@@ -145,9 +145,22 @@ function uid(prefix) {
   return prefix + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 async function hashPassword(pwd) {
-  const enc = new TextEncoder().encode(pwd);
-  const buf = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  try {
+    if (window.crypto && window.crypto.subtle && typeof window.crypto.subtle.digest === "function") {
+      const enc = new TextEncoder().encode(pwd);
+      const buf = await window.crypto.subtle.digest("SHA-256", enc);
+      return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+  } catch (e) {
+    console.warn("Crypto API restricted or unavailable, using fallback hash:", e);
+  }
+  let hash = 0;
+  for (let i = 0; i < pwd.length; i++) {
+    const char = pwd.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return "h_" + Math.abs(hash).toString(36) + "_" + pwd.length;
 }
 function weeksSince(iso) {
   if (!iso) return 0;
@@ -436,7 +449,7 @@ function viewAuth(mode) {
           <h2>${isLogin ? "Welcome back" : "Create your account"}</h2>
           <p>${isLogin ? "Log in to your member account." : (memberCount ? "New accounts are automatically added to the group members roster." : "You are the first to register! You will be set up as Founding Administrator.")}</p>
 
-          <form id="authForm" class="form-grid" style="margin-top:22px">
+          <form id="authForm" data-mode="${mode}" class="form-grid" style="margin-top:22px">
             ${!isLogin ? `
             <div class="field">
               <span>Full name</span>
@@ -1231,24 +1244,27 @@ function bindBackupHandlers() {
 function bindAuthForm() {
   const form = document.getElementById("authForm");
   if (!form) return;
-  const isLogin = route() === "/login";
+  const isLogin = (form.getAttribute("data-mode") || (route() === "/login" ? "login" : "register")) === "login";
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = document.getElementById("authMsg");
     const btn = document.getElementById("authSubmitBtn");
-    msg.innerHTML = "";
+    if (msg) msg.innerHTML = "";
+
     const fd = new FormData(form);
     const email = String(fd.get("email") || "").trim().toLowerCase();
     const password = String(fd.get("password") || "");
 
     if (!email || !password) {
-      msg.innerHTML = errorBox("Enter an email and password.");
+      if (msg) msg.innerHTML = errorBox("Enter an email and password.");
       return;
     }
 
-    btn.disabled = true;
-    btn.innerHTML = `<span style="display:inline-flex;animation:spin 0.8s linear infinite">${icon("loader", 16)}</span> Processing…`;
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span style="display:inline-flex;animation:spin 0.8s linear infinite">${icon("loader", 16)}</span> Processing…`;
+    }
 
     try {
       const hash = await hashPassword(password);
@@ -1256,13 +1272,13 @@ function bindAuthForm() {
       if (isLogin) {
         const match = DATA.members.find((m) => m.email.toLowerCase() === email && m.hash === hash);
         if (!match) {
-          msg.innerHTML = errorBox("Incorrect email or password.");
-          btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`;
+          if (msg) msg.innerHTML = errorBox("Incorrect email or password.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`; }
           return;
         }
         if (!match.active) {
-          msg.innerHTML = errorBox("This account has been deactivated. Contact an administrator.");
-          btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`;
+          if (msg) msg.innerHTML = errorBox("This account has been deactivated. Contact an administrator.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`; }
           return;
         }
         setSession(match.id);
@@ -1273,23 +1289,23 @@ function bindAuthForm() {
         const confirm = String(fd.get("confirm") || "");
 
         if (!name || !nickname) {
-          msg.innerHTML = errorBox("Please enter your full name and nickname.");
-          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          if (msg) msg.innerHTML = errorBox("Please enter your full name and nickname.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`; }
           return;
         }
         if (password !== confirm) {
-          msg.innerHTML = errorBox("Passwords do not match.");
-          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          if (msg) msg.innerHTML = errorBox("Passwords do not match.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`; }
           return;
         }
         if (password.length < 6) {
-          msg.innerHTML = errorBox("Password must be at least 6 characters.");
-          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          if (msg) msg.innerHTML = errorBox("Password must be at least 6 characters.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`; }
           return;
         }
         if (DATA.members.some((m) => m.email.toLowerCase() === email)) {
-          msg.innerHTML = errorBox("That email address is already registered.");
-          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          if (msg) msg.innerHTML = errorBox("That email address is already registered.");
+          if (btn) { btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`; }
           return;
         }
 
@@ -1313,9 +1329,12 @@ function bindAuthForm() {
         navigate("/dashboard");
       }
     } catch (err) {
-      msg.innerHTML = errorBox("Something went wrong — please try again.");
-      btn.disabled = false;
-      btn.innerHTML = `${icon("check", 16)} ${isLogin ? "Log in" : "Create account"}`;
+      console.error("Auth form submission error:", err);
+      if (msg) msg.innerHTML = errorBox(err.message || "Something went wrong — please try again.");
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon("check", 16)} ${isLogin ? "Log in" : "Create account"}`;
+      }
     }
   });
 }
