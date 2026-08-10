@@ -1,13 +1,12 @@
 /* =========================================================================
    Bankroll Brotherhood — vanilla JS SPA
-   Data persists in localStorage under key "bb_data_v1".
+   Data persists in localStorage under key "bb_data_v2".
    ========================================================================= */
 
-const STORAGE_KEY = "bb_data_v1";
-const SESSION_KEY = "bb_session_v1";
+const STORAGE_KEY = "bb_data_v2";
+const SESSION_KEY = "bb_session_v2";
 
 const IMG = {
-  // People in an office gathered around a laptop — used as background photography
   office: "https://images.unsplash.com/photo-1758519288814-bb9f97e4df95?fm=jpg&q=75&w=1800&auto=format&fit=crop",
   officeAlt: "https://images.unsplash.com/photo-1758519288969-4806f015852d?fm=jpg&q=75&w=1200&auto=format&fit=crop",
 };
@@ -36,7 +35,10 @@ const ICONS = {
   upload: `<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`,
   history: `<path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`,
   dollarSign: `<path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`,
+  userCheck: `<path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M8.5 11a4 4 0 100-8 4 4 0 000 8zM17 11l2 2 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`,
+  refresh: `<path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`,
 };
+
 function icon(name, size = 15) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" style="flex-shrink:0">${ICONS[name] || ""}</svg>`;
 }
@@ -53,14 +55,10 @@ function seedData() {
       penaltyRule: "KES 50 late fee for each missed Saturday contribution.",
     },
     members: [],
-    investments: [
-      { id: "inv_1", name: "Money Market Fund", invested: 4000, current: 4300, status: "Active" },
-      { id: "inv_2", name: "Sacco Shares", invested: 2000, current: 1850, status: "Active" },
-    ],
+    investments: [],
     meetings: [
-      { id: "mt_1", date: nextSaturday(0), topic: "Contribution review & first investment scan" },
-      { id: "mt_2", date: nextSaturday(4), topic: "Monthly finance review" },
-      { id: "mt_3", date: nextSaturday(8), topic: "Investment performance check-in" },
+      { id: "mt_1", date: nextSaturday(0), topic: "Weekly contribution check-in & portfolio review" },
+      { id: "mt_2", date: nextSaturday(4), topic: "Monthly financial strategy meeting" },
     ],
     transactions: [],
   };
@@ -75,17 +73,31 @@ function loadData() {
       return seeded;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.transactions)) {
-      parsed.transactions = [];
-    }
+    if (!Array.isArray(parsed.members)) parsed.members = [];
+    if (!Array.isArray(parsed.transactions)) parsed.transactions = [];
+    if (!Array.isArray(parsed.investments)) parsed.investments = [];
+    if (!Array.isArray(parsed.meetings)) parsed.meetings = [];
+    if (!parsed.settings) parsed.settings = seedData().settings;
     return parsed;
   } catch {
-    return seedData();
+    const seeded = seedData();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
+    return seeded;
   }
 }
+
 function saveData() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
 }
+
+function resetDatabase() {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  DATA = seedData();
+  saveData();
+  render();
+}
+
 function getSession() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch { return null; }
 }
@@ -97,6 +109,14 @@ function clearSession() {
 }
 
 let DATA = loadData();
+
+// Synchronize across open browser windows/tabs
+window.addEventListener("storage", (e) => {
+  if (e.key === STORAGE_KEY || e.key === SESSION_KEY) {
+    DATA = loadData();
+    render();
+  }
+});
 
 /* ---------------------------------------------------------------------
    Utilities
@@ -110,6 +130,7 @@ function nextSaturday(offsetWeeks) {
   return d.toISOString().slice(0, 10);
 }
 function fmtDate(iso) {
+  if (!iso) return "N/A";
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
@@ -129,6 +150,7 @@ async function hashPassword(pwd) {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 function weeksSince(iso) {
+  if (!iso) return 0;
   const start = new Date(iso + "T00:00:00").getTime();
   const now = Date.now();
   if (now < start) return 0;
@@ -147,18 +169,11 @@ function memberTransactions(mId) {
 
 function memberContribution(m) {
   const txs = memberTransactions(m.id);
-  const totalFromTx = txs.filter((t) => t.type === "contribution").reduce((s, t) => s + Number(t.amount || 0), 0);
-  if (txs.length > 0 || (DATA.transactions && DATA.transactions.length > 0)) {
-    return totalFromTx;
-  }
-  const gross = weeksSince(m.joined) * (m.weeklyAmount || 0);
-  return Math.max(0, gross - (m.penaltyOwed || 0));
+  return txs.filter((t) => t.type === "contribution").reduce((s, t) => s + Number(t.amount || 0), 0);
 }
+
 function totalPooled() {
-  if (DATA.transactions && DATA.transactions.length > 0) {
-    return DATA.transactions.filter((t) => t.type === "contribution").reduce((s, t) => s + Number(t.amount || 0), 0);
-  }
-  return DATA.members.reduce((s, m) => s + memberContribution(m), 0);
+  return (DATA.transactions || []).filter((t) => t.type === "contribution").reduce((s, t) => s + Number(t.amount || 0), 0);
 }
 function totalPenaltiesCollected() {
   return (DATA.transactions || []).filter((t) => t.type === "penalty_payment").reduce((s, t) => s + Number(t.amount || 0), 0);
@@ -166,8 +181,8 @@ function totalPenaltiesCollected() {
 function totalWithdrawals() {
   return (DATA.transactions || []).filter((t) => t.type === "withdrawal").reduce((s, t) => s + Number(t.amount || 0), 0);
 }
-function totalInvested() { return DATA.investments.reduce((s, i) => s + Number(i.invested || 0), 0); }
-function totalCurrentValue() { return DATA.investments.reduce((s, i) => s + Number(i.current || 0), 0); }
+function totalInvested() { return (DATA.investments || []).reduce((s, i) => s + Number(i.invested || 0), 0); }
+function totalCurrentValue() { return (DATA.investments || []).reduce((s, i) => s + Number(i.current || 0), 0); }
 function cashReserve() {
   const netPool = totalPooled() + totalPenaltiesCollected() - totalWithdrawals();
   return Math.max(0, netPool - totalInvested());
@@ -318,7 +333,6 @@ function poolWidget() {
         </filter>
       </defs>
 
-      <!-- Ellipse 1 (Tilted -40deg) -->
       <g transform="rotate(-40, 160, 160)">
         <ellipse cx="160" cy="160" rx="140" ry="52" fill="none" stroke="rgba(255,107,107,0.35)" stroke-width="1.5" stroke-dasharray="6 4"/>
         <circle r="7" fill="#FF6B6B" filter="url(#glowRed)">
@@ -326,7 +340,6 @@ function poolWidget() {
         </circle>
       </g>
 
-      <!-- Ellipse 2 (Tilted +40deg) -->
       <g transform="rotate(40, 160, 160)">
         <ellipse cx="160" cy="160" rx="140" ry="52" fill="none" stroke="rgba(67,230,196,0.35)" stroke-width="1.5" stroke-dasharray="6 4"/>
         <circle r="7" fill="#43E6C4" filter="url(#glowTeal)">
@@ -334,7 +347,6 @@ function poolWidget() {
         </circle>
       </g>
 
-      <!-- Ellipse 3 (Tilted +80deg / near vertical) -->
       <g transform="rotate(80, 160, 160)">
         <ellipse cx="160" cy="160" rx="140" ry="52" fill="none" stroke="rgba(212,175,55,0.4)" stroke-width="1.5"/>
         <circle r="7" fill="#D4AF37" filter="url(#glowGold)">
@@ -374,7 +386,7 @@ function viewAbout() {
                 <p class="leader-name">${escapeHtml(m.nickname)} <span>&middot; ${escapeHtml(m.name)}</span></p>
                 <p class="leader-role">Administrator</p>
               </div>
-            </div>`).join("") : `<p class="empty-state" style="width:100%">No administrator has registered yet — the first person to register becomes the founding admin.</p>`}
+            </div>`).join("") : `<p class="empty-state" style="width:100%">No administrator registered yet — create an account to become the founding administrator.</p>`}
         </div>
       </div>
 
@@ -406,14 +418,15 @@ function initials(name) {
    --------------------------------------------------------------------- */
 function viewAuth(mode) {
   const isLogin = mode === "login";
+  const memberCount = activeMembers().length;
   return `
   <div class="auth-shell fade-in">
     <div class="auth-visual">
       <img class="bg-photo" src="${IMG.officeAlt}" alt="Members reviewing a laptop together in the office" />
       <div class="photo-overlay dark"></div>
       <div class="visual-content">
-        <span class="tag">PRIVATE TO MEMBERS</span>
-        <p>${activeMembers().length ? "One shared pool. Nothing visible until you're signed in." : "Be the first to register — you'll become the founding administrator."}</p>
+        <span class="tag">PRIVATE MEMBER PORTAL</span>
+        <p>${memberCount ? "One shared pool. Log in to access your personal member dashboard." : "No accounts created yet — register to become the Founding Administrator."}</p>
       </div>
     </div>
     <div class="auth-form-side">
@@ -421,7 +434,7 @@ function viewAuth(mode) {
         <div class="auth-card-logo">${logoMark(28)}</div>
         <div class="auth-panel">
           <h2>${isLogin ? "Welcome back" : "Create your account"}</h2>
-          <p>${isLogin ? "Log in to view the shared dashboard." : (activeMembers().length ? "New members join at the group's standard rate — an admin can adjust it later." : "You're the first to register, so you'll be set up as the founding administrator.")}</p>
+          <p>${isLogin ? "Log in to your member account." : (memberCount ? "New accounts are automatically added to the group members roster." : "You are the first to register! You will be set up as Founding Administrator.")}</p>
 
           <form id="authForm" class="form-grid" style="margin-top:22px">
             ${!isLogin ? `
@@ -461,15 +474,15 @@ function viewAuth(mode) {
             </div>` : ""}
             <div id="authMsg"></div>
             <button type="submit" class="btn btn-gold" style="margin-top:6px" id="authSubmitBtn">
-              ${isLogin ? icon("check", 16) : icon("check", 16)} ${isLogin ? "Log in" : "Create account"}
+              ${isLogin ? icon("check", 16) : icon("userCheck", 16)} ${isLogin ? "Log in" : "Create account & join roster"}
             </button>
           </form>
           <p class="auth-switch">
-            ${isLogin ? "New here?" : "Already registered?"}
-            <button data-goto="${isLogin ? "/register" : "/login"}">${isLogin ? "Register" : "Log in"}</button>
+            ${isLogin ? "New member?" : "Already registered?"}
+            <button data-goto="${isLogin ? "/register" : "/login"}">${isLogin ? "Create account" : "Log in"}</button>
           </p>
         </div>
-        <p class="auth-footnote">Passwords are hashed in your browser before saving. This is suitable for a small private group but isn't bank-grade security.</p>
+        <p class="auth-footnote">Private partnership system. Your member details will automatically reflect in the group roster once created.</p>
       </div>
     </div>
   </div>`;
@@ -480,46 +493,71 @@ function logoMark(size) {
 }
 
 /* ---------------------------------------------------------------------
-   Dashboard
+   CLIENT PORTAL (Dashboard for Members)
    --------------------------------------------------------------------- */
 function viewDashboard(member) {
+  const myContrib = memberContribution(member);
+  const myTxs = memberTransactions(member.id);
+  const isAdmin = member.role === "admin";
+
   return dashboardShell(member, "dashboard", `
-    <div class="dash-topbar">
-      <button class="icon-btn" id="sidebarToggle">${icon("menu", 16)}</button>
-      <div class="status-pill">${icon("shield", 13)} ${DATA.members.length ? "Live group data" : "No members yet — invite the group"}</div>
+    <!-- Distinct Client Portal Header -->
+    <div class="portal-header client-portal-header">
+      <div class="flex items-center justify-between flex-wrap gap-12">
+        <div>
+          <div class="portal-badge client">${icon("users", 13)} CLIENT / MEMBER PORTAL</div>
+          <h1 class="dash-h1">Welcome back, ${escapeHtml(member.nickname)}</h1>
+          <p class="dash-sub">Account: <strong>${escapeHtml(member.email)}</strong> &middot; Role: <span class="badge ${isAdmin ? 'badge-admin' : 'badge-client'}">${isAdmin ? 'ADMINISTRATOR' : 'MEMBER'}</span></p>
+        </div>
+        <div class="dash-topbar-actions flex gap-10 items-center">
+          <button class="icon-btn mobile-only" id="sidebarToggle">${icon("menu", 16)}</button>
+          ${isAdmin ? `<a href="#/admin" class="btn btn-sm btn-gold">${icon("shield", 14)} Switch to Admin Control Center</a>` : ''}
+        </div>
+      </div>
     </div>
 
-    <div id="sec-overview" class="fade-in">
-      <h1 class="dash-h1">Welcome, ${escapeHtml(member.nickname)}</h1>
-      <p class="dash-sub">Since ${fmtDate(DATA.settings.founded)} &middot; ${fmt(weeklyGroupRate())} pooled weekly across ${activeMembers().length} member${activeMembers().length === 1 ? "" : "s"}</p>
+    <!-- Personal Financial Overview Card -->
+    <div class="personal-summary-card">
+      <div class="personal-summary-title">${icon("sparkles", 15)} My Account Summary</div>
+      <div class="metric-row" style="margin-top:12px">
+        ${metricCard("dollarSign", "My Total Contributed", fmt(myContrib), "Lifetime savings")}
+        ${metricCard("target", "My Weekly Obligation", fmt(member.weeklyAmount) + " / wk", "Saturday contribution")}
+        ${metricCard("alert", "My Penalty Status", fmt(member.penaltyOwed || 0), member.penaltyOwed > 0 ? "Penalty active" : "Good standing", member.penaltyOwed > 0 ? "down" : "up")}
+        ${metricCard("userCheck", "Account Status", member.active ? "Active Member" : "Inactive", `Joined ${fmtDate(member.joined)}`, "up")}
+      </div>
+    </div>
 
-      <div class="metric-row">
-        ${metricCard("target", "Total portfolio value", fmt(totalPortfolio()))}
-        ${metricCard("target", "Cash reserve", fmt(cashReserve()), "awaiting next investment")}
-        ${metricCard("trending", "Net profit / loss", fmt(Math.abs(netPL())), netPL() >= 0 ? "up overall" : "down overall", netPL() >= 0 ? "up" : "down")}
+    <!-- Group Investment & Portfolio Metrics (Read-only transparency for client) -->
+    <div class="section-block" style="margin-top:28px">
+      <h2>Group Savings Pool Overview</h2>
+      <div class="metric-row" style="margin-top:12px">
+        ${metricCard("target", "Total Portfolio Value", fmt(totalPortfolio()))}
+        ${metricCard("target", "Group Cash Reserve", fmt(cashReserve()), "Available for investments")}
+        ${metricCard("trending", "Net Portfolio P/L", fmt(Math.abs(netPL())), netPL() >= 0 ? "Gain overall" : "Loss overall", netPL() >= 0 ? "up" : "down")}
       </div>
 
       <div class="panels-row">
         <div class="card" style="flex:2 1 420px">
-          <span class="panel-label">POOLED CONTRIBUTIONS — PROJECTED (last 12 weeks at current rate)</span>
+          <span class="panel-label">GROUP POOLED CONTRIBUTIONS — 12-WEEK PROJECTION</span>
           ${barChart(projectedWeeks(12))}
         </div>
         <div class="card" style="flex:1 1 260px">
-          <span class="panel-label">FUND ALLOCATION</span>
+          <span class="panel-label">PORTFOLIO ASSET ALLOCATION</span>
           ${allocationDonut()}
         </div>
       </div>
     </div>
 
+    <!-- Group Investments -->
     <div id="sec-investments" class="section-block">
-      <h2>Investments</h2>
+      <h2>Active Group Investments</h2>
       <div class="panels-row" style="margin-top:0">
         <div class="card" style="flex:1 1 320px">
           <span class="panel-label">PROFIT / LOSS BY INVESTMENT</span>
           ${barChartPL(DATA.investments.map((i) => ({ name: i.name.split(" ")[0], pl: Number(i.current) - Number(i.invested) })))}
         </div>
         <div class="card" style="flex:1 1 320px">
-          <span class="panel-label">ACTIVE POSITIONS</span>
+          <span class="panel-label">POSITIONS HELD BY GROUP</span>
           <div style="margin-top:14px">
             ${DATA.investments.length ? DATA.investments.map((inv) => positionRow(inv)).join("") : `<p class="empty-state">No investments recorded yet.</p>`}
           </div>
@@ -527,22 +565,29 @@ function viewDashboard(member) {
       </div>
     </div>
 
+    <!-- Transactions Section -->
     <div id="sec-transactions" class="section-block">
       <div class="flex items-center justify-between gap-12" style="margin-bottom:16px;flex-wrap:wrap">
-        <h2 style="margin:0">Transaction Ledger</h2>
-        <button class="btn btn-sm btn-gold" id="toggleTxFormBtn">${icon("plus", 15)} Record contribution / payment</button>
+        <div>
+          <h2 style="margin:0">Transaction Ledger</h2>
+          <p class="dash-sub" style="margin:2px 0 0">Log your deposits or view the group history.</p>
+        </div>
+        <button class="btn btn-sm btn-gold" id="toggleTxFormBtn">${icon("plus", 15)} Log contribution</button>
       </div>
 
+      <!-- Record Contribution Form -->
       <div id="recordTxFormCard" class="card" style="display:none;margin-bottom:20px">
-        <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">Record a transaction</h3>
-        <form id="recordTxForm" class="form-grid">
+        <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 6px">Log a Contribution / Deposit</h3>
+        <p class="hint">Records a new contribution under your account or selected member profile.</p>
+        <form id="recordTxForm" class="form-grid" style="margin-top:12px">
           <div class="form-row-2">
             <div class="field">
-              <span>Member</span>
+              <span>Member Account</span>
               <div class="field-input">
-                <select name="memberId" required>
-                  ${activeMembers().map(m => `<option value="${m.id}" ${m.id === member.id ? 'selected' : ''}>${escapeHtml(m.nickname)} (${escapeHtml(m.name)})</option>`).join("")}
+                <select name="memberId" ${!isAdmin ? 'disabled style="opacity:0.8"' : ''} required>
+                  ${activeMembers().map(m => `<option value="${m.id}" ${m.id === member.id ? 'selected' : ''}>${escapeHtml(m.nickname)} (${escapeHtml(m.name)}) ${m.id === member.id ? '— (You)' : ''}</option>`).join("")}
                 </select>
+                ${!isAdmin ? `<input type="hidden" name="memberId" value="${member.id}" />` : ''}
               </div>
             </div>
             <div class="field">
@@ -551,7 +596,7 @@ function viewDashboard(member) {
                 <select name="type" required>
                   <option value="contribution">Contribution</option>
                   <option value="penalty_payment">Penalty Payment</option>
-                  <option value="withdrawal">Group Withdrawal</option>
+                  ${isAdmin ? `<option value="withdrawal">Group Withdrawal (Admin only)</option>` : ''}
                 </select>
               </div>
             </div>
@@ -560,7 +605,7 @@ function viewDashboard(member) {
             <div class="field">
               <span>Amount (KES)</span>
               <div class="field-input">
-                <input name="amount" type="number" min="1" placeholder="250" required />
+                <input name="amount" type="number" min="1" value="${member.weeklyAmount}" placeholder="250" required />
               </div>
             </div>
             <div class="field">
@@ -571,14 +616,14 @@ function viewDashboard(member) {
             </div>
           </div>
           <div class="field">
-            <span>Note / Reference</span>
+            <span>Note / M-Pesa Reference</span>
             <div class="field-input">
-              <input name="note" type="text" placeholder="e.g. Weekly Saturday contribution via M-Pesa" />
+              <input name="note" type="text" placeholder="e.g. Saturday contribution via M-Pesa" />
             </div>
           </div>
           <div id="recordTxMsg"></div>
           <div class="flex gap-8" style="margin-top:6px">
-            <button type="submit" class="btn btn-gold btn-sm">${icon("check", 15)} Save transaction</button>
+            <button type="submit" class="btn btn-gold btn-sm">${icon("check", 15)} Submit record</button>
             <button type="button" class="btn btn-ghost btn-sm" id="cancelTxFormBtn">Cancel</button>
           </div>
         </form>
@@ -594,14 +639,14 @@ function viewDashboard(member) {
                 <th>Type</th>
                 <th>Amount</th>
                 <th>Note</th>
-                ${member.role === 'admin' ? '<th>Actions</th>' : ''}
+                ${isAdmin ? '<th>Actions</th>' : ''}
               </tr>
             </thead>
             <tbody>
               ${(DATA.transactions && DATA.transactions.length)
                 ? DATA.transactions.slice().sort((a,b) => b.date.localeCompare(a.date)).map(tx => {
                     const m = DATA.members.find(x => x.id === tx.memberId);
-                    const name = m ? m.nickname : "Group / External";
+                    const name = m ? (m.id === member.id ? `${m.nickname} (You)` : m.nickname) : "Group / External";
                     const typeLabel = tx.type === "contribution" ? "Contribution" : tx.type === "penalty_payment" ? "Penalty Payment" : "Withdrawal";
                     return `
                     <tr data-tx-id="${tx.id}">
@@ -610,10 +655,10 @@ function viewDashboard(member) {
                       <td><span class="tx-type-tag ${tx.type}">${typeLabel}</span></td>
                       <td style="font-family:var(--font-mono);font-weight:600">${fmt(tx.amount)}</td>
                       <td style="color:var(--muted);font-size:12.5px">${escapeHtml(tx.note || "—")}</td>
-                      ${member.role === 'admin' ? `<td><button class="btn btn-xs btn-danger delete-tx-btn">Delete</button></td>` : ''}
+                      ${isAdmin ? `<td><button class="btn btn-xs btn-danger delete-tx-btn">Delete</button></td>` : ''}
                     </tr>`;
                   }).join("")
-                : `<tr><td colspan="${member.role === 'admin' ? 6 : 5}"><p class="empty-state">No transactions logged yet. Click "Record contribution / payment" to log deposits.</p></td></tr>`
+                : `<tr><td colspan="${isAdmin ? 6 : 5}"><p class="empty-state">No transactions logged yet. Click "Log contribution" above to record a payment.</p></td></tr>`
               }
             </tbody>
           </table>
@@ -621,23 +666,32 @@ function viewDashboard(member) {
       </div>
     </div>
 
+    <!-- Active Members Roster (Client View) -->
     <div id="sec-members" class="section-block">
-      <h2>Members</h2>
+      <div class="flex items-center justify-between" style="margin-bottom:14px">
+        <h2>Group Members Roster (${activeMembers().length})</h2>
+        <span class="hint">Automatically updated as new members join</span>
+      </div>
       <div class="members-grid">
         ${activeMembers().length ? activeMembers().map((m) => `
-          <div class="card member-card">
+          <div class="card member-card ${m.id === member.id ? 'is-self' : ''}">
             <div class="avatar ${m.role === 'admin' ? '' : 'teal'}">${initials(m.nickname)}</div>
             <div>
-              <p class="leader-name">${escapeHtml(m.nickname)} <span>&middot; ${escapeHtml(m.name)}</span> ${m.role === "admin" ? `<span class="badge badge-admin">ADMIN</span>` : ""}</p>
-              <p class="member-amt">${fmt(m.weeklyAmount)} / week &middot; Total ${fmt(memberContribution(m))}</p>
+              <p class="leader-name">
+                ${escapeHtml(m.nickname)} <span>&middot; ${escapeHtml(m.name)}</span>
+                ${m.id === member.id ? `<span class="badge badge-you">YOU</span>` : ""}
+                ${m.role === "admin" ? `<span class="badge badge-admin">ADMIN</span>` : ""}
+              </p>
+              <p class="member-amt">${fmt(m.weeklyAmount)} / week &middot; Total Contributed ${fmt(memberContribution(m))}</p>
               ${m.penaltyOwed ? `<p class="member-penalty">${fmt(m.penaltyOwed)} penalty owed</p>` : ""}
             </div>
-          </div>`).join("") : `<p class="empty-state">No members yet.</p>`}
+          </div>`).join("") : `<p class="empty-state">No active members registered yet.</p>`}
       </div>
     </div>
 
+    <!-- Meetings Schedule -->
     <div id="sec-meetings" class="section-block">
-      <h2>Upcoming meetings</h2>
+      <h2>Upcoming Group Meetings</h2>
       <div class="card">
         ${DATA.meetings.length ? DATA.meetings.slice().sort((a, b) => a.date.localeCompare(b.date)).map((m) => `
           <div class="meeting-row">
@@ -678,7 +732,7 @@ function barChart(data) {
   <div class="barchart-labels">${data.map((d, i) => (i % 3 === 0 ? `<span>${d.label}</span>` : `<span></span>`)).join("")}</div>`;
 }
 function barChartPL(data) {
-  if (!data.length) return `<p class="empty-state">No investments yet.</p>`;
+  if (!data.length) return `<p class="empty-state">No investments recorded yet.</p>`;
   const max = Math.max(1, ...data.map((d) => Math.abs(d.pl)));
   return `
   <div class="barchart">
@@ -734,26 +788,37 @@ function allocationDonut() {
 function dashboardShell(member, activePath, contentHtml) {
   const isAdmin = member.role === "admin";
   return `
-  <div class="dash-shell">
+  <div class="dash-shell ${activePath === 'admin' ? 'is-admin-mode' : 'is-client-mode'}">
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
-    <div class="sidebar closed" id="sidebar">
+    <div class="sidebar closed ${isAdmin ? 'has-admin' : ''}" id="sidebar">
       <div style="padding:0 8px 10px">${logoInline()}</div>
-      <div class="sidebar-user">
-        <div class="avatar ${isAdmin ? '' : 'teal'}" style="width:28px;height:28px;font-size:10px">${initials(member.nickname)}</div>
+      
+      <!-- User profile in sidebar -->
+      <div class="sidebar-user ${isAdmin ? 'admin-user-card' : ''}">
+        <div class="avatar ${isAdmin ? '' : 'teal'}" style="width:30px;height:30px;font-size:11px">${initials(member.nickname)}</div>
         <div>
-          <p class="name">${escapeHtml(member.nickname)}${isAdmin ? `<span class="badge badge-admin">ADMIN</span>` : ""}</p>
-          <p class="full">${escapeHtml(member.name)}</p>
+          <p class="name">${escapeHtml(member.nickname)} ${isAdmin ? `<span class="badge badge-admin">ADMIN</span>` : ""}</p>
+          <p class="full">${escapeHtml(member.email)}</p>
         </div>
       </div>
+
+      <!-- Navigation list -->
       <div class="nav-list">
-        <a class="nav-item ${activePath === 'dashboard' ? 'active' : ''}" href="#/dashboard">${icon("home", 16)} Overview</a>
-        <a class="nav-item" href="#/dashboard#sec-investments" data-scroll="sec-investments">${icon("trending", 16)} Investments</a>
-        <a class="nav-item" href="#/dashboard#sec-transactions" data-scroll="sec-transactions">${icon("history", 16)} Transactions</a>
-        <a class="nav-item" href="#/dashboard#sec-members" data-scroll="sec-members">${icon("users", 16)} Members</a>
+        <a class="nav-item ${activePath === 'dashboard' ? 'active' : ''}" href="#/dashboard">${icon("home", 16)} Member Portal</a>
+        <a class="nav-item" href="#/dashboard#sec-investments" data-scroll="sec-investments">${icon("trending", 16)} Group Investments</a>
+        <a class="nav-item" href="#/dashboard#sec-transactions" data-scroll="sec-transactions">${icon("history", 16)} Ledger & Deposits</a>
+        <a class="nav-item" href="#/dashboard#sec-members" data-scroll="sec-members">${icon("users", 16)} Members Roster</a>
         <a class="nav-item" href="#/dashboard#sec-meetings" data-scroll="sec-meetings">${icon("calendar", 16)} Meetings</a>
-        <a class="nav-item" href="#/about">${icon("info", 16)} About</a>
-        ${isAdmin ? `<a class="nav-item admin-link ${activePath === 'admin' ? 'active' : ''}" href="#/admin">${icon("shield", 16)} Admin panel</a>` : ""}
+        <a class="nav-item" href="#/about">${icon("info", 16)} Constitution & About</a>
+
+        ${isAdmin ? `
+          <div class="sidebar-divider">ADMIN MANAGEMENT</div>
+          <a class="nav-item admin-link ${activePath === 'admin' ? 'active' : ''}" href="#/admin">
+            ${icon("shield", 16)} Admin Control Center
+          </a>
+        ` : ""}
       </div>
+
       <div class="sidebar-foot">
         <button class="nav-item" id="logoutBtn">${icon("logout", 16)} Log out</button>
       </div>
@@ -767,7 +832,7 @@ function logoInline() {
 }
 
 /* ---------------------------------------------------------------------
-   Admin panel
+   ADMIN CONTROL CENTER (Dedicated Admin Management Side)
    --------------------------------------------------------------------- */
 function adminTab(path) {
   const parts = path.split("/");
@@ -777,24 +842,36 @@ function adminTab(path) {
 function viewAdmin(member, path) {
   const tab = adminTab(path);
   const tabs = [
-    ["members", "Members"],
-    ["investments", "Investments"],
-    ["meetings", "Meetings"],
-    ["settings", "Settings"],
+    ["members", "Members Roster"],
+    ["investments", "Manage Investments"],
+    ["meetings", "Manage Meetings"],
+    ["settings", "Settings & Database Reset"],
   ];
   return dashboardShell(member, "admin", `
-    <div class="dash-topbar">
-      <button class="icon-btn" id="sidebarToggle">${icon("menu", 16)}</button>
-      <div class="status-pill teal">${icon("shield", 13)} Administrator access</div>
+    <!-- Distinct Executive Admin Header -->
+    <div class="portal-header admin-portal-header">
+      <div class="flex items-center justify-between flex-wrap gap-12">
+        <div>
+          <div class="portal-badge admin">${icon("shield", 13)} EXECUTIVE ADMIN CONTROL CENTER</div>
+          <h1 class="dash-h1" style="color:var(--gold)">Administrator Management Suite</h1>
+          <p class="dash-sub">Full authority over members, weekly rates, penalty waivers, investments, and database controls.</p>
+        </div>
+        <div class="flex gap-10 items-center">
+          <button class="icon-btn mobile-only" id="sidebarToggle">${icon("menu", 16)}</button>
+          <a href="#/dashboard" class="btn btn-sm btn-ghost">${icon("arrowRight", 14)} Return to Member Portal</a>
+        </div>
+      </div>
     </div>
-    <h1 class="dash-h1">Admin panel</h1>
-    <p class="dash-sub">Add or remove members, adjust weekly amounts, and reduce penalties.</p>
 
-    <div class="flex gap-8" style="margin-top:20px;flex-wrap:wrap">
-      ${tabs.map(([key, label]) => `<a href="#/admin/${key}" class="btn btn-sm ${tab === key ? "btn-gold" : "btn-ghost"}">${label}</a>`).join("")}
+    <!-- Admin Navigation Tabs -->
+    <div class="admin-tab-bar">
+      ${tabs.map(([key, label]) => `
+        <a href="#/admin/${key}" class="admin-tab-item ${tab === key ? "active" : ""}">
+          ${label}
+        </a>`).join("")}
     </div>
 
-    <div style="margin-top:24px">
+    <div style="margin-top:20px">
       ${tab === "members" ? adminMembersTab() : ""}
       ${tab === "investments" ? adminInvestmentsTab() : ""}
       ${tab === "meetings" ? adminMeetingsTab() : ""}
@@ -808,27 +885,30 @@ function adminMembersTab() {
   return `
   <div class="admin-grid">
     <div class="card admin-form-card">
-      <h3>Add a member</h3>
-      <p class="hint">Creates a login for a new group member at the standard weekly rate (editable below).</p>
+      <h3>Add New Member</h3>
+      <p class="hint">Creates an account for a new member. They will automatically appear in the members roster.</p>
       <form id="addMemberForm" class="form-grid">
         <div class="form-row-2">
-          <div class="field"><span>Full name</span><div class="field-input"><input name="name" required /></div></div>
-          <div class="field"><span>Nickname</span><div class="field-input"><input name="nickname" required /></div></div>
+          <div class="field"><span>Full name</span><div class="field-input"><input name="name" placeholder="e.g. John Kamau" required /></div></div>
+          <div class="field"><span>Nickname</span><div class="field-input"><input name="nickname" placeholder="e.g. Jay" required /></div></div>
         </div>
-        <div class="field"><span>Email</span><div class="field-input">${icon("mail", 15)}<input name="email" type="email" required /></div></div>
-        <div class="field"><span>Temporary password</span><div class="field-input">${icon("lock", 15)}<input name="password" type="password" required minlength="6" /></div></div>
-        <div class="field"><span>Weekly amount (KES)</span><div class="field-input"><input name="weeklyAmount" type="number" min="0" value="${DATA.settings.defaultWeeklyAmount}" required /></div></div>
+        <div class="field"><span>Email</span><div class="field-input">${icon("mail", 15)}<input name="email" type="email" placeholder="member@example.com" required /></div></div>
+        <div class="field"><span>Temporary password</span><div class="field-input">${icon("lock", 15)}<input name="password" type="password" placeholder="••••••••" required minlength="6" /></div></div>
+        <div class="field"><span>Weekly Contribution (KES)</span><div class="field-input"><input name="weeklyAmount" type="number" min="0" value="${DATA.settings.defaultWeeklyAmount}" required /></div></div>
         <div id="addMemberMsg"></div>
-        <button type="submit" class="btn btn-gold" style="margin-top:4px">${icon("plus", 16)} Add member</button>
+        <button type="submit" class="btn btn-gold" style="margin-top:4px">${icon("plus", 16)} Add member to roster</button>
       </form>
     </div>
 
     <div class="card" style="flex:2 1 460px">
-      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">All members (${DATA.members.length})</h3>
+      <div class="flex items-center justify-between" style="margin-bottom:14px">
+        <h3 style="font-family:var(--font-display);font-size:16px;margin:0">Registered Members (${DATA.members.length})</h3>
+        <span class="status-pill teal">${activeMembers().length} Active / ${DATA.members.length - activeMembers().length} Inactive</span>
+      </div>
       <div class="table-wrap">
         <table class="admin-table">
           <thead><tr>
-            <th>Member</th><th>Role</th><th>Weekly amount</th><th>Penalty owed</th><th>Status</th><th>Actions</th>
+            <th>Member</th><th>Role</th><th>Weekly Rate</th><th>Penalty Owed</th><th>Status</th><th>Actions</th>
           </tr></thead>
           <tbody>
           ${DATA.members.length ? DATA.members.map((m) => `
@@ -841,13 +921,13 @@ function adminMembersTab() {
               <td>
                 <div class="flex gap-8 items-center">
                   <input class="inline-input amount-input" type="number" min="0" value="${m.weeklyAmount}" />
-                  <button class="btn btn-xs btn-ghost save-amount-btn">Save</button>
+                  <button class="btn btn-xs btn-ghost save-amount-btn" title="Save rate">Save</button>
                 </div>
               </td>
               <td>
                 <div class="flex gap-8 items-center">
                   <input class="inline-input penalty-input" type="number" min="0" value="${m.penaltyOwed || 0}" />
-                  <button class="btn btn-xs btn-ghost save-penalty-btn">Save</button>
+                  <button class="btn btn-xs btn-ghost save-penalty-btn" title="Save penalty">Save</button>
                   <button class="btn btn-xs btn-ghost waive-penalty-btn" title="Set to 0">Waive</button>
                 </div>
               </td>
@@ -856,16 +936,16 @@ function adminMembersTab() {
                 <div class="row-actions">
                   ${m.active ? `<button class="btn btn-xs btn-ghost toggle-role-btn">${m.role === "admin" ? "Demote" : "Make admin"}</button>` : ""}
                   ${m.active
-                    ? `<button class="btn btn-xs btn-danger remove-member-btn">Remove</button>`
+                    ? `<button class="btn btn-xs btn-danger remove-member-btn">Deactivate</button>`
                     : `<button class="btn btn-xs btn-ghost reactivate-member-btn">Reactivate</button>`}
                   <button class="btn btn-xs btn-danger delete-member-btn" title="Permanently delete record">Delete</button>
                 </div>
               </td>
-            </tr>`).join("") : `<tr><td colspan="6"><p class="empty-state">No members yet — add the first one on the left.</p></td></tr>`}
+            </tr>`).join("") : `<tr><td colspan="6"><p class="empty-state">No members registered yet. Add a new member on the left.</p></td></tr>`}
           </tbody>
         </table>
       </div>
-      <p class="hint" style="margin-top:12px">Currently ${admins} administrator${admins === 1 ? "" : "s"}. At least one must remain — the panel will block demoting or removing the last one.</p>
+      <p class="hint" style="margin-top:12px">Currently ${admins} administrator${admins === 1 ? "" : "s"}. At least 1 admin must exist.</p>
     </div>
   </div>`;
 }
@@ -874,27 +954,27 @@ function adminInvestmentsTab() {
   return `
   <div class="admin-grid">
     <div class="card admin-form-card">
-      <h3>Add an investment</h3>
-      <p class="hint">Record a new position the group has moved cash into.</p>
+      <h3>Add Group Investment</h3>
+      <p class="hint">Record a new asset position purchased with pooled money.</p>
       <form id="addInvestmentForm" class="form-grid">
-        <div class="field"><span>Name</span><div class="field-input"><input name="name" required /></div></div>
+        <div class="field"><span>Investment Name</span><div class="field-input"><input name="name" placeholder="e.g. Money Market Fund" required /></div></div>
         <div class="form-row-2">
-          <div class="field"><span>Amount invested</span><div class="field-input"><input name="invested" type="number" min="0" required /></div></div>
-          <div class="field"><span>Current value</span><div class="field-input"><input name="current" type="number" min="0" required /></div></div>
+          <div class="field"><span>Amount Invested (KES)</span><div class="field-input"><input name="invested" type="number" min="0" required /></div></div>
+          <div class="field"><span>Current Valuation (KES)</span><div class="field-input"><input name="current" type="number" min="0" required /></div></div>
         </div>
         <div class="field"><span>Status</span><div class="field-input"><select name="status"><option>Active</option><option>Matured</option><option>Exited</option></select></div></div>
         <button type="submit" class="btn btn-gold" style="margin-top:4px">${icon("plus", 16)} Add investment</button>
       </form>
     </div>
     <div class="card" style="flex:2 1 460px">
-      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">Investments (${DATA.investments.length})</h3>
+      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">Active Investments (${DATA.investments.length})</h3>
       <div class="table-wrap">
         <table class="admin-table">
           <thead><tr><th>Name</th><th>Invested</th><th>Current value</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
           ${DATA.investments.length ? DATA.investments.map((inv) => `
             <tr data-inv-id="${inv.id}">
-              <td>${escapeHtml(inv.name)}</td>
+              <td><strong>${escapeHtml(inv.name)}</strong></td>
               <td><input class="inline-input inv-invested-input" type="number" min="0" value="${inv.invested}" /></td>
               <td><input class="inline-input inv-current-input" type="number" min="0" value="${inv.current}" /></td>
               <td>${escapeHtml(inv.status)}</td>
@@ -902,7 +982,7 @@ function adminInvestmentsTab() {
                 <button class="btn btn-xs btn-ghost save-inv-btn">Save</button>
                 <button class="btn btn-xs btn-danger delete-inv-btn">Delete</button>
               </td>
-            </tr>`).join("") : `<tr><td colspan="5"><p class="empty-state">No investments recorded.</p></td></tr>`}
+            </tr>`).join("") : `<tr><td colspan="5"><p class="empty-state">No investments recorded yet.</p></td></tr>`}
           </tbody>
         </table>
       </div>
@@ -914,15 +994,15 @@ function adminMeetingsTab() {
   return `
   <div class="admin-grid">
     <div class="card admin-form-card">
-      <h3>Schedule a meeting</h3>
+      <h3>Schedule Group Meeting</h3>
       <form id="addMeetingForm" class="form-grid">
-        <div class="field"><span>Date</span><div class="field-input"><input name="date" type="date" required /></div></div>
-        <div class="field"><span>Topic</span><div class="field-input"><input name="topic" required /></div></div>
+        <div class="field"><span>Date</span><div class="field-input"><input name="date" type="date" value="${nextSaturday(0)}" required /></div></div>
+        <div class="field"><span>Meeting Agenda / Topic</span><div class="field-input"><input name="topic" placeholder="e.g. Monthly contribution review" required /></div></div>
         <button type="submit" class="btn btn-gold" style="margin-top:4px">${icon("plus", 16)} Add meeting</button>
       </form>
     </div>
     <div class="card" style="flex:2 1 460px">
-      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">Meetings (${DATA.meetings.length})</h3>
+      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 14px">Scheduled Meetings (${DATA.meetings.length})</h3>
       ${DATA.meetings.length ? DATA.meetings.slice().sort((a, b) => a.date.localeCompare(b.date)).map((m) => `
         <div class="meeting-row" data-meeting-id="${m.id}">
           <div>
@@ -940,12 +1020,12 @@ function adminSettingsTab() {
   return `
   <div class="flex gap-20 flex-wrap align-start">
     <div class="card" style="flex:1 1 360px;max-width:520px">
-      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 4px">Group settings</h3>
-      <p class="hint">Applies group-wide. Existing members keep their own weekly amount unless you change it individually.</p>
-      <form id="settingsForm" class="form-grid">
-        <div class="field"><span>Group name</span><div class="field-input"><input name="groupName" value="${escapeHtml(s.groupName)}" required /></div></div>
-        <div class="field"><span>Default weekly amount for new members (KES)</span><div class="field-input"><input name="defaultWeeklyAmount" type="number" min="0" value="${s.defaultWeeklyAmount}" required /></div></div>
-        <div class="field"><span>Penalty rule (shown on About page)</span><div class="field-input"><input name="penaltyRule" value="${escapeHtml(s.penaltyRule)}" required /></div></div>
+      <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 4px">Group Partnership Settings</h3>
+      <p class="hint">Applies group-wide. Changing the default rate affects new members joining after this.</p>
+      <form id="settingsForm" class="form-grid" style="margin-top:12px">
+        <div class="field"><span>Group Name</span><div class="field-input"><input name="groupName" value="${escapeHtml(s.groupName)}" required /></div></div>
+        <div class="field"><span>Default Weekly Amount for New Members (KES)</span><div class="field-input"><input name="defaultWeeklyAmount" type="number" min="0" value="${s.defaultWeeklyAmount}" required /></div></div>
+        <div class="field"><span>Penalty Rule Description</span><div class="field-input"><input name="penaltyRule" value="${escapeHtml(s.penaltyRule)}" required /></div></div>
         <div id="settingsMsg"></div>
         <button type="submit" class="btn btn-gold" style="margin-top:4px">${icon("check", 16)} Save settings</button>
       </form>
@@ -953,7 +1033,7 @@ function adminSettingsTab() {
 
     <div class="card" style="flex:1 1 360px;max-width:520px">
       <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 4px">Data Backup & Recovery</h3>
-      <p class="hint">Export your complete group data as a JSON file or restore from a previous backup file.</p>
+      <p class="hint">Export complete group data as JSON or restore from a backup file.</p>
       <div class="flex gap-12 flex-wrap" style="margin-top:16px">
         <button class="btn btn-ghost btn-sm" id="exportDataBtn">
           ${icon("download", 15)} Export Backup (JSON)
@@ -964,20 +1044,29 @@ function adminSettingsTab() {
         </label>
       </div>
       <div id="backupMsg" style="margin-top:14px"></div>
+
+      <hr style="border:none;border-top:1px solid var(--line);margin:24px 0" />
+
+      <!-- Database Reset Section -->
+      <div class="danger-zone-box">
+        <h4 style="color:var(--coral);margin:0 0 4px;font-size:14px">${icon("trash", 14)} Clear Database & Start Fresh</h4>
+        <p class="hint" style="color:var(--muted)">Wipes all registered members, ledger history, investments, and resets the website so you can start clean.</p>
+        <button class="btn btn-danger btn-sm" id="resetDbBtn" style="margin-top:8px">
+          ${icon("refresh", 14)} Clear All Database Data
+        </button>
+      </div>
     </div>
   </div>`;
 }
 
 /* ---------------------------------------------------------------------
-   Event handlers
+   Event handlers & bindings
    --------------------------------------------------------------------- */
 function bindGlobalHandlers() {
-  // top nav + in-page nav links using data-goto
   document.querySelectorAll("[data-goto]").forEach((el) => {
     el.addEventListener("click", () => navigate(el.getAttribute("data-goto")));
   });
 
-  // smooth-scroll sidebar links
   document.querySelectorAll("[data-scroll]").forEach((el) => {
     el.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1114,6 +1203,8 @@ function bindBackupHandlers() {
           if (!confirm("Restore backup? This will replace your current data with the backup file.")) return;
           DATA = parsed;
           if (!Array.isArray(DATA.transactions)) DATA.transactions = [];
+          if (!Array.isArray(DATA.investments)) DATA.investments = [];
+          if (!Array.isArray(DATA.meetings)) DATA.meetings = [];
           saveData();
           render();
           alert("Backup successfully restored!");
@@ -1125,12 +1216,23 @@ function bindBackupHandlers() {
       reader.readAsText(file);
     });
   }
+
+  const resetDbBtn = document.getElementById("resetDbBtn");
+  if (resetDbBtn) {
+    resetDbBtn.addEventListener("click", () => {
+      if (confirm("Are you sure you want to clear the entire database? All members, ledger records, and investments will be deleted so you can start fresh.")) {
+        resetDatabase();
+        alert("Database cleared successfully. You can now start again!");
+      }
+    });
+  }
 }
 
 function bindAuthForm() {
   const form = document.getElementById("authForm");
   if (!form) return;
-  const isLogin = window.location.hash === "#/login";
+  const isLogin = route() === "/login";
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = document.getElementById("authMsg");
@@ -1146,7 +1248,7 @@ function bindAuthForm() {
     }
 
     btn.disabled = true;
-    btn.innerHTML = `<span style="display:inline-flex;animation:spin 0.8s linear infinite">${icon("loader", 16)}</span> Please wait…`;
+    btn.innerHTML = `<span style="display:inline-flex;animation:spin 0.8s linear infinite">${icon("loader", 16)}</span> Processing…`;
 
     try {
       const hash = await hashPassword(password);
@@ -1159,7 +1261,7 @@ function bindAuthForm() {
           return;
         }
         if (!match.active) {
-          msg.innerHTML = errorBox("This account has been removed. Contact an administrator.");
+          msg.innerHTML = errorBox("This account has been deactivated. Contact an administrator.");
           btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`;
           return;
         }
@@ -1169,25 +1271,42 @@ function bindAuthForm() {
         const name = String(fd.get("name") || "").trim();
         const nickname = String(fd.get("nickname") || "").trim();
         const confirm = String(fd.get("confirm") || "");
-        if (!name || !nickname) { msg.innerHTML = errorBox("Enter your name and nickname."); btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Create account`; return; }
-        if (password !== confirm) { msg.innerHTML = errorBox("Passwords don't match."); btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Create account`; return; }
-        if (password.length < 6) { msg.innerHTML = errorBox("Use at least 6 characters."); btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Create account`; return; }
-        if (DATA.members.some((m) => m.email.toLowerCase() === email)) {
-          msg.innerHTML = errorBox("That email is already registered.");
-          btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Create account`;
+
+        if (!name || !nickname) {
+          msg.innerHTML = errorBox("Please enter your full name and nickname.");
+          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
           return;
         }
+        if (password !== confirm) {
+          msg.innerHTML = errorBox("Passwords do not match.");
+          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          return;
+        }
+        if (password.length < 6) {
+          msg.innerHTML = errorBox("Password must be at least 6 characters.");
+          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          return;
+        }
+        if (DATA.members.some((m) => m.email.toLowerCase() === email)) {
+          msg.innerHTML = errorBox("That email address is already registered.");
+          btn.disabled = false; btn.innerHTML = `${icon("userCheck", 16)} Create account & join roster`;
+          return;
+        }
+
         const isFirst = DATA.members.length === 0;
         const newMember = {
           id: uid("m"),
-          name, nickname, email,
+          name,
+          nickname,
+          email,
           hash,
           role: isFirst ? "admin" : "member",
-          weeklyAmount: DATA.settings.defaultWeeklyAmount,
+          weeklyAmount: Number(DATA.settings.defaultWeeklyAmount || 250),
           penaltyOwed: 0,
           joined: todayISO(),
           active: true,
         };
+
         DATA.members.push(newMember);
         saveData();
         setSession(newMember.id);
@@ -1209,7 +1328,6 @@ function successBox(text) {
 }
 
 function bindAdminForms() {
-  // Add member
   const addMemberForm = document.getElementById("addMemberForm");
   if (addMemberForm) {
     addMemberForm.addEventListener("submit", async (e) => {
@@ -1220,7 +1338,7 @@ function bindAdminForms() {
       const name = String(fd.get("name") || "").trim();
       const nickname = String(fd.get("nickname") || "").trim();
       const password = String(fd.get("password") || "");
-      const weeklyAmount = Number(fd.get("weeklyAmount") || 0);
+      const weeklyAmount = Number(fd.get("weeklyAmount") || DATA.settings.defaultWeeklyAmount);
 
       if (DATA.members.some((m) => m.email.toLowerCase() === email)) {
         msg.innerHTML = errorBox("That email is already registered.");
@@ -1237,7 +1355,6 @@ function bindAdminForms() {
     });
   }
 
-  // Members table actions
   document.querySelectorAll("tr[data-member-id]").forEach((row) => {
     const id = row.getAttribute("data-member-id");
     const member = DATA.members.find((m) => m.id === id);
@@ -1272,7 +1389,7 @@ function bindAdminForms() {
         alert("At least one administrator must remain. Promote another member before removing this one.");
         return;
       }
-      if (!confirm(`Remove ${member.nickname} from the group? Their contribution history is kept, but they won't be able to log in.`)) return;
+      if (!confirm(`Deactivate ${member.nickname}'s account? They won't be able to log in, but historical data is preserved.`)) return;
       member.active = false;
       const sess = getSession();
       if (sess && sess.memberId === member.id) clearSession();
@@ -1288,7 +1405,7 @@ function bindAdminForms() {
         alert("At least one administrator must remain.");
         return;
       }
-      if (!confirm(`Permanently delete ${member.nickname}'s record? This cannot be undone.`)) return;
+      if (!confirm(`Permanently delete ${member.nickname}'s account record? This cannot be undone.`)) return;
       DATA.members = DATA.members.filter((m) => m.id !== id);
       const sess = getSession();
       if (sess && sess.memberId === id) clearSession();
@@ -1296,7 +1413,6 @@ function bindAdminForms() {
     });
   });
 
-  // Investments
   const addInvestmentForm = document.getElementById("addInvestmentForm");
   if (addInvestmentForm) {
     addInvestmentForm.addEventListener("submit", (e) => {
@@ -1328,7 +1444,6 @@ function bindAdminForms() {
     });
   });
 
-  // Meetings
   const addMeetingForm = document.getElementById("addMeetingForm");
   if (addMeetingForm) {
     addMeetingForm.addEventListener("submit", (e) => {
@@ -1350,7 +1465,6 @@ function bindAdminForms() {
     });
   });
 
-  // Settings
   const settingsForm = document.getElementById("settingsForm");
   if (settingsForm) {
     settingsForm.addEventListener("submit", (e) => {
