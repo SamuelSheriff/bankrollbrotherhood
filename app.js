@@ -1,10 +1,11 @@
 /* =========================================================================
    Bankroll Brotherhood — vanilla JS SPA
-   Data persists in localStorage under key "bb_data_v2".
+   Data persists in cloud API (JSONBlob) & localStorage under key "bb_data_v2".
    ========================================================================= */
 
 const STORAGE_KEY = "bb_data_v2";
 const SESSION_KEY = "bb_session_v2";
+const CLOUD_SYNC_URL = "https://jsonblob.com/api/jsonBlob/019fedda-2a46-7026-96bc-57e6a093f13c";
 
 const IMG = {
   office: "https://images.unsplash.com/photo-1758519288814-bb9f97e4df95?fm=jpg&q=75&w=1800&auto=format&fit=crop",
@@ -44,7 +45,7 @@ function icon(name, size = 15) {
 }
 
 /* ---------------------------------------------------------------------
-   Data model + persistence
+   Data model + persistence (Local + Cloud Real-time Database)
    --------------------------------------------------------------------- */
 function seedData() {
   return {
@@ -61,7 +62,46 @@ function seedData() {
       { id: "mt_2", date: nextSaturday(4), topic: "Monthly financial strategy meeting" },
     ],
     transactions: [],
+    _lastUpdated: Date.now(),
   };
+}
+
+function sanitizeData(parsed) {
+  if (!parsed || typeof parsed !== "object") return seedData();
+  if (!Array.isArray(parsed.members)) parsed.members = [];
+  if (!Array.isArray(parsed.transactions)) parsed.transactions = [];
+  if (!Array.isArray(parsed.investments)) parsed.investments = [];
+  if (!Array.isArray(parsed.meetings)) parsed.meetings = [];
+  if (!parsed.settings || typeof parsed.settings !== "object") {
+    parsed.settings = seedData().settings;
+  } else {
+    // Fill in any missing settings fields with defaults
+    const defaults = seedData().settings;
+    if (!parsed.settings.founded) parsed.settings.founded = defaults.founded;
+    if (!parsed.settings.defaultWeeklyAmount) parsed.settings.defaultWeeklyAmount = defaults.defaultWeeklyAmount;
+    if (!parsed.settings.penaltyRule) parsed.settings.penaltyRule = defaults.penaltyRule;
+    if (!parsed.settings.groupName) parsed.settings.groupName = defaults.groupName;
+  }
+  if (!parsed._lastUpdated) parsed._lastUpdated = 0;
+
+  // Ensure member defaults without breaking admin assignments
+  let hasAdmin = false;
+  parsed.members.forEach((m) => {
+    if (typeof m.active === "undefined") m.active = true;
+    if (typeof m.weeklyAmount === "undefined") m.weeklyAmount = parsed.settings.defaultWeeklyAmount || 250;
+    if (typeof m.penaltyOwed === "undefined") m.penaltyOwed = 0;
+    if (m.active && m.role === "admin") {
+      hasAdmin = true;
+    }
+  });
+
+  // If active members exist but no admin is assigned, assign the first active member as admin
+  if (!hasAdmin) {
+    const firstActive = parsed.members.find((m) => m.active);
+    if (firstActive) firstActive.role = "admin";
+  }
+
+  return parsed;
 }
 
 function loadData() {
@@ -72,20 +112,7 @@ function loadData() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
       return seeded;
     }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.members)) parsed.members = [];
-    else {
-      parsed.members.forEach((m) => {
-        if (typeof m.active === "undefined") m.active = true;
-        if (typeof m.weeklyAmount === "undefined") m.weeklyAmount = parsed.settings?.defaultWeeklyAmount || 250;
-        if (typeof m.penaltyOwed === "undefined") m.penaltyOwed = 0;
-      });
-    }
-    if (!Array.isArray(parsed.transactions)) parsed.transactions = [];
-    if (!Array.isArray(parsed.investments)) parsed.investments = [];
-    if (!Array.isArray(parsed.meetings)) parsed.meetings = [];
-    if (!parsed.settings) parsed.settings = seedData().settings;
-    return parsed;
+    return sanitizeData(JSON.parse(raw));
   } catch {
     const seeded = seedData();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
@@ -94,13 +121,55 @@ function loadData() {
 }
 
 function saveData() {
+  DATA._lastUpdated = Date.now();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
+  pushToCloud();
+}
+
+let _cloudSyncPaused = false; // Pause cloud sync briefly after writes to prevent race conditions
+
+async function syncFromCloud() {
+  if (_cloudSyncPaused) return;
+  try {
+    const res = await fetch(CLOUD_SYNC_URL, { cache: "no-store" });
+    if (!res.ok) return;
+    const parsed = await res.json();
+    if (parsed && typeof parsed === "object") {
+      const sanitized = sanitizeData(parsed);
+      // Only apply cloud data if it is NEWER than our local copy
+      const cloudTs = sanitized._lastUpdated || 0;
+      const localTs = DATA._lastUpdated || 0;
+      if (cloudTs > localTs) {
+        DATA = sanitized;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
+        render();
+      }
+    }
+  } catch (e) {
+    console.warn("Cloud sync fetch error:", e);
+  }
+}
+
+async function pushToCloud() {
+  // Pause incoming syncs for 5s after a write to avoid overwrite race
+  _cloudSyncPaused = true;
+  setTimeout(() => { _cloudSyncPaused = false; }, 5000);
+  try {
+    await fetch(CLOUD_SYNC_URL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(DATA),
+    });
+  } catch (e) {
+    console.warn("Cloud sync push error:", e);
+  }
 }
 
 function resetDatabase() {
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(SESSION_KEY);
   DATA = seedData();
+  _cloudSyncPaused = false;
   saveData();
   render();
 }
@@ -116,8 +185,9 @@ function clearSession() {
 }
 
 let DATA = loadData();
+syncFromCloud();
+setInterval(syncFromCloud, 15000); // Cross-device real-time sync every 15s
 
-// Synchronize across open browser windows/tabs
 window.addEventListener("storage", (e) => {
   if (e.key === STORAGE_KEY || e.key === SESSION_KEY) {
     DATA = loadData();
@@ -159,7 +229,7 @@ async function hashPassword(pwd) {
       return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
     }
   } catch (e) {
-    console.warn("Crypto API restricted or unavailable, using fallback hash:", e);
+    console.warn("Crypto API restricted, using fallback hash:", e);
   }
   let hash = 0;
   for (let i = 0; i < pwd.length; i++) {
@@ -213,7 +283,7 @@ function totalPenaltiesOwed() { return DATA.members.reduce((s, m) => s + (m.pena
 function weeklyGroupRate() { return activeMembers().reduce((s, m) => s + (m.weeklyAmount || 0), 0); }
 
 /* ---------------------------------------------------------------------
-   Router
+   Router & Top Navigation
    --------------------------------------------------------------------- */
 const app = document.getElementById("app");
 const topNav = document.getElementById("topNav");
@@ -236,10 +306,50 @@ function route() {
   return hash;
 }
 
+function renderTopNav() {
+  const linksEl = document.getElementById("topNavLinks");
+  if (!linksEl) return;
+  const member = currentMember();
+  const path = route();
+
+  if (member) {
+    // LOGGED IN: Hide Register & Login buttons completely!
+    const isAdmin = member.role === "admin";
+    linksEl.innerHTML = `
+      <a href="#/" data-nav="/">Home</a>
+      <a href="#/about" data-nav="/about">About</a>
+      <a href="#/dashboard" data-nav="/dashboard" class="btn btn-gold btn-sm">${icon("home", 14)} Dashboard</a>
+      <span class="nav-user-pill ${isAdmin ? 'admin' : ''}">
+        ${icon(isAdmin ? "shield" : "users", 13)} ${escapeHtml(member.nickname)} (${isAdmin ? 'Admin' : 'Member'})
+      </span>
+      <button id="topNavLogoutBtn" class="btn btn-ghost btn-sm">${icon("logout", 14)} Log out</button>
+    `;
+    document.getElementById("topNavLogoutBtn")?.addEventListener("click", () => {
+      clearSession();
+      navigate("/");
+    });
+  } else {
+    // NOT LOGGED IN: Show Log in & Register buttons
+    linksEl.innerHTML = `
+      <a href="#/" data-nav="/">Home</a>
+      <a href="#/about" data-nav="/about">About</a>
+      <a href="#/login" data-nav="/login" class="btn btn-ghost btn-sm">Log in</a>
+      <a href="#/register" data-nav="/register" class="btn btn-gold btn-sm">Register</a>
+    `;
+  }
+
+  highlightNav(path);
+}
+
 function render() {
   const path = route();
   const member = currentMember();
 
+  // Guard: Logged-in users should NOT see login or register forms!
+  if ((path === "/login" || path === "/register") && member) {
+    navigate("/dashboard");
+    return;
+  }
   // Guard: dashboard/admin require session
   if ((path.startsWith("/dashboard") || path.startsWith("/admin")) && !member) {
     navigate("/login");
@@ -254,15 +364,15 @@ function render() {
   const isAppShell = path.startsWith("/dashboard") || path.startsWith("/admin");
   topNav.style.display = isAppShell ? "none" : "";
 
+  renderTopNav();
+
   if (path === "/") app.innerHTML = viewLanding();
   else if (path === "/about") app.innerHTML = viewAbout();
   else if (path === "/login") app.innerHTML = viewAuth("login");
   else if (path === "/register") app.innerHTML = viewAuth("register");
-  else if (path.startsWith("/dashboard")) app.innerHTML = viewDashboard(member, path);
-  else if (path.startsWith("/admin")) app.innerHTML = viewAdmin(member, path);
+  else if (path.startsWith("/dashboard") || path.startsWith("/admin")) app.innerHTML = viewDashboard(member, path);
   else app.innerHTML = viewLanding();
 
-  highlightNav(path);
   bindGlobalHandlers();
   window.scrollTo(0, 0);
 }
@@ -278,6 +388,7 @@ function highlightNav(path) {
    --------------------------------------------------------------------- */
 function viewLanding() {
   const s = DATA.settings;
+  const member = currentMember();
   const objectives = [
     "Encourage financial discipline among every member.",
     "Provide a structured, weekly savings rhythm.",
@@ -293,8 +404,12 @@ function viewLanding() {
           <h1>Every Saturday,<br/>the pool grows.</h1>
           <p>${escapeHtml(s.groupName)} is a disciplined savings partnership. No rotations, no payouts — every shilling accumulates until it becomes a deliberate, group-approved investment.</p>
           <div class="hero-actions">
-            <a href="#/register" class="btn btn-gold">Get started ${icon("arrowRight", 16)}</a>
-            <a href="#/about" class="btn btn-ghost">Read the constitution</a>
+            ${member ? `
+              <a href="#/dashboard" class="btn btn-gold">Go to Dashboard ${icon("arrowRight", 16)}</a>
+            ` : `
+              <a href="#/register" class="btn btn-gold">Get started ${icon("arrowRight", 16)}</a>
+              <a href="#/login" class="btn btn-ghost">Member Log in</a>
+            `}
           </div>
           <div class="chip-row">
             <div class="chip">${icon("users", 14)}<strong>${activeMembers().length}</strong><span>active members</span></div>
@@ -389,6 +504,7 @@ function poolWidget() {
 function viewAbout() {
   const s = DATA.settings;
   const leaders = allMembers().filter((m) => m.role === "admin" && m.active);
+  const member = currentMember();
   return `
   <div class="about-page fade-in">
     <div class="wrap-narrow">
@@ -413,18 +529,22 @@ function viewAbout() {
       <div class="about-block">
         <span class="section-label">MEMBERSHIP &amp; PENALTIES</span>
         <div class="info-box">
-          <p>New members register and join at the group's standard weekly rate of ${fmt(s.defaultWeeklyAmount)}, adjustable per member by an administrator as circumstances change. ${escapeHtml(s.penaltyRule)} Administrators may reduce or waive penalties at their discretion.</p>
+          <p>New members register and join at the group's standard weekly rate of ${fmt(s.defaultWeeklyAmount)}, adjustable per member by the administrator as circumstances change. ${escapeHtml(s.penaltyRule)} Administrators may reduce or waive penalties at their discretion.</p>
         </div>
       </div>
 
       <div class="about-block">
         <span class="section-label">HOW DECISIONS ARE MADE</span>
         <div class="info-box">
-          <p>Decisions on investments, membership, and amendments are made by the group's administrators in consultation with all members. Where members can't agree, the matter is tabled for further discussion at the next meeting.</p>
+          <p>Decisions on investments, membership, and amendments are made by the group's administrator in consultation with all members. Where members can't agree, the matter is tabled for further discussion at the next meeting.</p>
         </div>
       </div>
 
-      <a href="#/register" class="btn btn-gold" style="margin-top:36px">Join the group ${icon("chevronRight", 16)}</a>
+      ${member ? `
+        <a href="#/dashboard" class="btn btn-gold" style="margin-top:36px">Go to Dashboard ${icon("chevronRight", 16)}</a>
+      ` : `
+        <a href="#/register" class="btn btn-gold" style="margin-top:36px">Join the group ${icon("chevronRight", 16)}</a>
+      `}
     </div>
   </div>`;
 }
@@ -513,43 +633,44 @@ function logoMark(size) {
 }
 
 /* ---------------------------------------------------------------------
-   CLIENT PORTAL (Dashboard for Members)
+   UNIFIED DASHBOARD (Client Portal + Inline Administrator Panel)
    --------------------------------------------------------------------- */
-function viewDashboard(member) {
+function viewDashboard(member, path) {
   const myContrib = memberContribution(member);
-  const myTxs = memberTransactions(member.id);
   const isAdmin = member.role === "admin";
+  const currentTab = path.split("/")[2] || "overview";
 
-  return dashboardShell(member, "dashboard", `
-    <!-- Distinct Client Portal Header -->
-    <div class="portal-header client-portal-header">
+  return dashboardShell(member, currentTab, `
+    <!-- Header Banner -->
+    <div class="portal-header ${isAdmin ? 'admin-portal-header' : 'client-portal-header'}">
       <div class="flex items-center justify-between flex-wrap gap-12">
         <div>
-          <div class="portal-badge client">${icon("users", 13)} CLIENT / MEMBER PORTAL</div>
+          <div class="portal-badge ${isAdmin ? 'admin' : 'client'}">
+            ${icon(isAdmin ? "shield" : "users", 13)} ${isAdmin ? 'EXECUTIVE ADMINISTRATOR' : 'MEMBER PORTAL'}
+          </div>
           <h1 class="dash-h1">Welcome back, ${escapeHtml(member.nickname)}</h1>
           <p class="dash-sub">Account: <strong>${escapeHtml(member.email)}</strong> &middot; Role: <span class="badge ${isAdmin ? 'badge-admin' : 'badge-client'}">${isAdmin ? 'ADMINISTRATOR' : 'MEMBER'}</span></p>
         </div>
         <div class="dash-topbar-actions flex gap-10 items-center">
           <button class="icon-btn mobile-only" id="sidebarToggle">${icon("menu", 16)}</button>
-          ${isAdmin ? `<a href="#/admin" class="btn btn-sm btn-gold">${icon("shield", 14)} Switch to Admin Control Center</a>` : ''}
         </div>
       </div>
     </div>
 
-    <!-- Personal Financial Overview Card -->
+    <!-- Personal Account Overview -->
     <div class="personal-summary-card">
-      <div class="personal-summary-title">${icon("sparkles", 15)} My Account Summary</div>
+      <div class="personal-summary-title">${icon("sparkles", 15)} My Account Standing</div>
       <div class="metric-row" style="margin-top:12px">
         ${metricCard("dollarSign", "My Total Contributed", fmt(myContrib), "Lifetime savings")}
-        ${metricCard("target", "My Weekly Obligation", fmt(member.weeklyAmount) + " / wk", "Saturday contribution")}
+        ${metricCard("target", "My Weekly Requirement", fmt(member.weeklyAmount) + " / wk", "Saturday contribution")}
         ${metricCard("alert", "My Penalty Status", fmt(member.penaltyOwed || 0), member.penaltyOwed > 0 ? "Penalty active" : "Good standing", member.penaltyOwed > 0 ? "down" : "up")}
         ${metricCard("userCheck", "Account Status", member.active ? "Active Member" : "Inactive", `Joined ${fmtDate(member.joined)}`, "up")}
       </div>
     </div>
 
-    <!-- Group Investment & Portfolio Metrics (Read-only transparency for client) -->
-    <div class="section-block" style="margin-top:28px">
-      <h2>Group Savings Pool Overview</h2>
+    <!-- Group Pooled Financials & Transparency -->
+    <div id="sec-overview" class="section-block" style="margin-top:28px">
+      <h2>Group Financial Overview</h2>
       <div class="metric-row" style="margin-top:12px">
         ${metricCard("target", "Total Portfolio Value", fmt(totalPortfolio()))}
         ${metricCard("target", "Group Cash Reserve", fmt(cashReserve()), "Available for investments")}
@@ -568,24 +689,30 @@ function viewDashboard(member) {
       </div>
     </div>
 
-    <!-- Group Investments -->
-    <div id="sec-investments" class="section-block">
-      <h2>Active Group Investments</h2>
-      <div class="panels-row" style="margin-top:0">
-        <div class="card" style="flex:1 1 320px">
-          <span class="panel-label">PROFIT / LOSS BY INVESTMENT</span>
-          ${barChartPL(DATA.investments.map((i) => ({ name: i.name.split(" ")[0], pl: Number(i.current) - Number(i.invested) })))}
-        </div>
-        <div class="card" style="flex:1 1 320px">
-          <span class="panel-label">POSITIONS HELD BY GROUP</span>
-          <div style="margin-top:14px">
-            ${DATA.investments.length ? DATA.investments.map((inv) => positionRow(inv)).join("") : `<p class="empty-state">No investments recorded yet.</p>`}
-          </div>
-        </div>
+    <!-- Members Roster (Live Synced Across Devices) -->
+    <div id="sec-members" class="section-block">
+      <div class="flex items-center justify-between" style="margin-bottom:14px">
+        <h2>Group Members Roster (${activeMembers().length})</h2>
+        <span class="status-pill teal">Synced Cloud Database</span>
+      </div>
+      <div class="members-grid">
+        ${activeMembers().length ? activeMembers().map((m) => `
+          <div class="card member-card ${m.id === member.id ? 'is-self' : ''}">
+            <div class="avatar ${m.role === 'admin' ? '' : 'teal'}">${initials(m.nickname)}</div>
+            <div>
+              <p class="leader-name">
+                ${escapeHtml(m.nickname)} <span>&middot; ${escapeHtml(m.name)}</span>
+                ${m.id === member.id ? `<span class="badge badge-you">YOU</span>` : ""}
+                ${m.role === "admin" ? `<span class="badge badge-admin">ADMIN</span>` : ""}
+              </p>
+              <p class="member-amt">${fmt(m.weeklyAmount)} / week &middot; Total Contributed ${fmt(memberContribution(m))}</p>
+              ${m.penaltyOwed ? `<p class="member-penalty">${fmt(m.penaltyOwed)} penalty owed</p>` : ""}
+            </div>
+          </div>`).join("") : `<p class="empty-state">No members registered yet.</p>`}
       </div>
     </div>
 
-    <!-- Transactions Section -->
+    <!-- Transaction Ledger & Contribution Form -->
     <div id="sec-transactions" class="section-block">
       <div class="flex items-center justify-between gap-12" style="margin-bottom:16px;flex-wrap:wrap">
         <div>
@@ -595,10 +722,10 @@ function viewDashboard(member) {
         <button class="btn btn-sm btn-gold" id="toggleTxFormBtn">${icon("plus", 15)} Log contribution</button>
       </div>
 
-      <!-- Record Contribution Form -->
+      <!-- Log Deposit Form -->
       <div id="recordTxFormCard" class="card" style="display:none;margin-bottom:20px">
         <h3 style="font-family:var(--font-display);font-size:16px;margin:0 0 6px">Log a Contribution / Deposit</h3>
-        <p class="hint">Records a new contribution under your account or selected member profile.</p>
+        <p class="hint">Records a new contribution under your account.</p>
         <form id="recordTxForm" class="form-grid" style="margin-top:12px">
           <div class="form-row-2">
             <div class="field">
@@ -678,7 +805,7 @@ function viewDashboard(member) {
                       ${isAdmin ? `<td><button class="btn btn-xs btn-danger delete-tx-btn">Delete</button></td>` : ''}
                     </tr>`;
                   }).join("")
-                : `<tr><td colspan="${isAdmin ? 6 : 5}"><p class="empty-state">No transactions logged yet. Click "Log contribution" above to record a payment.</p></td></tr>`
+                : `<tr><td colspan="${isAdmin ? 6 : 5}"><p class="empty-state">No transactions logged yet. Click "Log contribution" above to record a deposit.</p></td></tr>`
               }
             </tbody>
           </table>
@@ -686,46 +813,57 @@ function viewDashboard(member) {
       </div>
     </div>
 
-    <!-- Active Members Roster (Client View) -->
-    <div id="sec-members" class="section-block">
-      <div class="flex items-center justify-between" style="margin-bottom:14px">
-        <h2>Group Members Roster (${activeMembers().length})</h2>
-        <span class="hint">Automatically updated as new members join</span>
-      </div>
-      <div class="members-grid">
-        ${activeMembers().length ? activeMembers().map((m) => `
-          <div class="card member-card ${m.id === member.id ? 'is-self' : ''}">
-            <div class="avatar ${m.role === 'admin' ? '' : 'teal'}">${initials(m.nickname)}</div>
-            <div>
-              <p class="leader-name">
-                ${escapeHtml(m.nickname)} <span>&middot; ${escapeHtml(m.name)}</span>
-                ${m.id === member.id ? `<span class="badge badge-you">YOU</span>` : ""}
-                ${m.role === "admin" ? `<span class="badge badge-admin">ADMIN</span>` : ""}
-              </p>
-              <p class="member-amt">${fmt(m.weeklyAmount)} / week &middot; Total Contributed ${fmt(memberContribution(m))}</p>
-              ${m.penaltyOwed ? `<p class="member-penalty">${fmt(m.penaltyOwed)} penalty owed</p>` : ""}
-            </div>
-          </div>`).join("") : `<p class="empty-state">No active members registered yet.</p>`}
+    <!-- Active Group Investments & Meetings -->
+    <div id="sec-investments" class="section-block">
+      <h2>Group Investments &amp; Meetings</h2>
+      <div class="panels-row" style="margin-top:0">
+        <div class="card" style="flex:1 1 320px">
+          <span class="panel-label">ACTIVE POSITIONS</span>
+          <div style="margin-top:14px">
+            ${DATA.investments.length ? DATA.investments.map((inv) => positionRow(inv)).join("") : `<p class="empty-state">No investments recorded yet.</p>`}
+          </div>
+        </div>
+        <div class="card" style="flex:1 1 320px">
+          <span class="panel-label">UPCOMING MEETINGS</span>
+          <div style="margin-top:14px">
+            ${DATA.meetings.length ? DATA.meetings.slice().sort((a, b) => a.date.localeCompare(b.date)).map((m) => `
+              <div class="meeting-row">
+                <div class="flex items-center gap-12">
+                  <div class="meeting-date-icon">${icon("calendar", 15)}</div>
+                  <div>
+                    <p class="meeting-date">${fmtDate(m.date)}</p>
+                    <p class="meeting-topic">${escapeHtml(m.topic)}</p>
+                  </div>
+                </div>
+              </div>`).join("") : `<p class="empty-state">No meetings scheduled.</p>`}
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- Meetings Schedule -->
-    <div id="sec-meetings" class="section-block">
-      <h2>Upcoming Group Meetings</h2>
-      <div class="card">
-        ${DATA.meetings.length ? DATA.meetings.slice().sort((a, b) => a.date.localeCompare(b.date)).map((m) => `
-          <div class="meeting-row">
-            <div class="flex items-center gap-12">
-              <div class="meeting-date-icon">${icon("calendar", 15)}</div>
-              <div>
-                <p class="meeting-date">${fmtDate(m.date)}</p>
-                <p class="meeting-topic">${escapeHtml(m.topic)}</p>
-              </div>
-            </div>
-            ${icon("chevronRight", 16)}
-          </div>`).join("") : `<p class="empty-state">No meetings scheduled.</p>`}
+    <!-- UNIFIED ADMINISTRATOR SUITE (Only rendered if member is the Administrator) -->
+    ${isAdmin ? `
+      <div id="sec-admin" class="section-block" style="margin-top:40px;border-top:2px dashed var(--gold-soft);padding-top:28px">
+        <div class="flex items-center justify-between" style="margin-bottom:18px">
+          <div>
+            <span class="portal-badge admin">${icon("shield", 13)} EXECUTIVE ADMINISTRATOR CONTROL PANEL</span>
+            <h2 style="margin:4px 0 0;color:var(--gold)">Administrator Controls</h2>
+          </div>
+          <span class="status-pill teal">1 Administrator Authorized</span>
+        </div>
+
+        <div class="admin-tab-bar">
+          <button type="button" class="admin-tab-item ${currentTab === 'admin-members' || currentTab === 'overview' ? 'active' : ''}" data-tab="admin-members">Manage Members</button>
+          <button type="button" class="admin-tab-item ${currentTab === 'admin-investments' ? 'active' : ''}" data-tab="admin-investments">Manage Investments</button>
+          <button type="button" class="admin-tab-item ${currentTab === 'admin-meetings' ? 'active' : ''}" data-tab="admin-meetings">Manage Meetings</button>
+          <button type="button" class="admin-tab-item ${currentTab === 'admin-settings' ? 'active' : ''}" data-tab="admin-settings">Settings & Reset</button>
+        </div>
+
+        <div id="adminTabContent">
+          ${(currentTab === 'admin-investments') ? adminInvestmentsTab() : (currentTab === 'admin-meetings') ? adminMeetingsTab() : (currentTab === 'admin-settings') ? adminSettingsTab() : adminMembersTab()}
+        </div>
       </div>
-    </div>
+    ` : ""}
   `);
 }
 
@@ -808,12 +946,12 @@ function allocationDonut() {
 function dashboardShell(member, activePath, contentHtml) {
   const isAdmin = member.role === "admin";
   return `
-  <div class="dash-shell ${activePath === 'admin' ? 'is-admin-mode' : 'is-client-mode'}">
+  <div class="dash-shell ${isAdmin ? 'is-admin-mode' : 'is-client-mode'}">
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
     <div class="sidebar closed ${isAdmin ? 'has-admin' : ''}" id="sidebar">
       <div style="padding:0 8px 10px">${logoInline()}</div>
       
-      <!-- User profile in sidebar -->
+      <!-- User profile card in sidebar -->
       <div class="sidebar-user ${isAdmin ? 'admin-user-card' : ''}">
         <div class="avatar ${isAdmin ? '' : 'teal'}" style="width:30px;height:30px;font-size:11px">${initials(member.nickname)}</div>
         <div>
@@ -824,17 +962,16 @@ function dashboardShell(member, activePath, contentHtml) {
 
       <!-- Navigation list -->
       <div class="nav-list">
-        <a class="nav-item ${activePath === 'dashboard' ? 'active' : ''}" href="#/dashboard">${icon("home", 16)} Member Portal</a>
-        <a class="nav-item" href="#/dashboard#sec-investments" data-scroll="sec-investments">${icon("trending", 16)} Group Investments</a>
-        <a class="nav-item" href="#/dashboard#sec-transactions" data-scroll="sec-transactions">${icon("history", 16)} Ledger & Deposits</a>
+        <a class="nav-item ${activePath === 'overview' ? 'active' : ''}" href="#/dashboard">${icon("home", 16)} Overview</a>
         <a class="nav-item" href="#/dashboard#sec-members" data-scroll="sec-members">${icon("users", 16)} Members Roster</a>
-        <a class="nav-item" href="#/dashboard#sec-meetings" data-scroll="sec-meetings">${icon("calendar", 16)} Meetings</a>
+        <a class="nav-item" href="#/dashboard#sec-transactions" data-scroll="sec-transactions">${icon("history", 16)} Ledger & Deposits</a>
+        <a class="nav-item" href="#/dashboard#sec-investments" data-scroll="sec-investments">${icon("trending", 16)} Investments & Meetings</a>
         <a class="nav-item" href="#/about">${icon("info", 16)} Constitution & About</a>
 
         ${isAdmin ? `
-          <div class="sidebar-divider">ADMIN MANAGEMENT</div>
-          <a class="nav-item admin-link ${activePath === 'admin' ? 'active' : ''}" href="#/admin">
-            ${icon("shield", 16)} Admin Control Center
+          <div class="sidebar-divider">ADMINISTRATION</div>
+          <a class="nav-item admin-link" href="#/dashboard#sec-admin" data-scroll="sec-admin">
+            ${icon("shield", 16)} Admin Controls
           </a>
         ` : ""}
       </div>
@@ -852,61 +989,15 @@ function logoInline() {
 }
 
 /* ---------------------------------------------------------------------
-   ADMIN CONTROL CENTER (Dedicated Admin Management Side)
+   ADMINISTRATOR TABS (Inline Admin Panel)
    --------------------------------------------------------------------- */
-function adminTab(path) {
-  const parts = path.split("/");
-  return parts[2] || "members";
-}
-
-function viewAdmin(member, path) {
-  const tab = adminTab(path);
-  const tabs = [
-    ["members", "Members Roster"],
-    ["investments", "Manage Investments"],
-    ["meetings", "Manage Meetings"],
-    ["settings", "Settings & Database Reset"],
-  ];
-  return dashboardShell(member, "admin", `
-    <!-- Distinct Executive Admin Header -->
-    <div class="portal-header admin-portal-header">
-      <div class="flex items-center justify-between flex-wrap gap-12">
-        <div>
-          <div class="portal-badge admin">${icon("shield", 13)} EXECUTIVE ADMIN CONTROL CENTER</div>
-          <h1 class="dash-h1" style="color:var(--gold)">Administrator Management Suite</h1>
-          <p class="dash-sub">Full authority over members, weekly rates, penalty waivers, investments, and database controls.</p>
-        </div>
-        <div class="flex gap-10 items-center">
-          <button class="icon-btn mobile-only" id="sidebarToggle">${icon("menu", 16)}</button>
-          <a href="#/dashboard" class="btn btn-sm btn-ghost">${icon("arrowRight", 14)} Return to Member Portal</a>
-        </div>
-      </div>
-    </div>
-
-    <!-- Admin Navigation Tabs -->
-    <div class="admin-tab-bar">
-      ${tabs.map(([key, label]) => `
-        <a href="#/admin/${key}" class="admin-tab-item ${tab === key ? "active" : ""}">
-          ${label}
-        </a>`).join("")}
-    </div>
-
-    <div style="margin-top:20px">
-      ${tab === "members" ? adminMembersTab() : ""}
-      ${tab === "investments" ? adminInvestmentsTab() : ""}
-      ${tab === "meetings" ? adminMeetingsTab() : ""}
-      ${tab === "settings" ? adminSettingsTab() : ""}
-    </div>
-  `);
-}
-
 function adminMembersTab() {
   const admins = DATA.members.filter((m) => m.active && m.role === "admin").length;
   return `
   <div class="admin-grid">
     <div class="card admin-form-card">
       <h3>Add New Member</h3>
-      <p class="hint">Creates an account for a new member. They will automatically appear in the members roster.</p>
+      <p class="hint">Creates an account for a new group member. They will automatically appear in the roster across all devices.</p>
       <form id="addMemberForm" class="form-grid">
         <div class="form-row-2">
           <div class="field"><span>Full name</span><div class="field-input"><input name="name" placeholder="e.g. John Kamau" required /></div></div>
@@ -1067,10 +1158,9 @@ function adminSettingsTab() {
 
       <hr style="border:none;border-top:1px solid var(--line);margin:24px 0" />
 
-      <!-- Database Reset Section -->
       <div class="danger-zone-box">
-        <h4 style="color:var(--coral);margin:0 0 4px;font-size:14px">${icon("trash", 14)} Clear Database & Start Fresh</h4>
-        <p class="hint" style="color:var(--muted)">Wipes all registered members, ledger history, investments, and resets the website so you can start clean.</p>
+        <h4 style="color:var(--coral);margin:0 0 4px;font-size:14px">${icon("trash", 14)} Clear Database & Reset</h4>
+        <p class="hint" style="color:var(--muted)">Wipes all registered members, ledger history, investments, and resets the website across all synced devices.</p>
         <button class="btn btn-danger btn-sm" id="resetDbBtn" style="margin-top:8px">
           ${icon("refresh", 14)} Clear All Database Data
         </button>
@@ -1093,6 +1183,13 @@ function bindGlobalHandlers() {
       const id = el.getAttribute("data-scroll");
       const target = document.getElementById(id);
       if (target) target.scrollIntoView({ behavior: "smooth" });
+    });
+  });
+
+  document.querySelectorAll(".admin-tab-item[data-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.getAttribute("data-tab");
+      navigate("/dashboard/" + tab);
     });
   });
 
@@ -1221,10 +1318,7 @@ function bindBackupHandlers() {
             throw new Error("Invalid backup file format.");
           }
           if (!confirm("Restore backup? This will replace your current data with the backup file.")) return;
-          DATA = parsed;
-          if (!Array.isArray(DATA.transactions)) DATA.transactions = [];
-          if (!Array.isArray(DATA.investments)) DATA.investments = [];
-          if (!Array.isArray(DATA.meetings)) DATA.meetings = [];
+          DATA = sanitizeData(parsed);
           saveData();
           render();
           alert("Backup successfully restored!");
@@ -1240,9 +1334,9 @@ function bindBackupHandlers() {
   const resetDbBtn = document.getElementById("resetDbBtn");
   if (resetDbBtn) {
     resetDbBtn.addEventListener("click", () => {
-      if (confirm("Are you sure you want to clear the entire database? All members, ledger records, and investments will be deleted so you can start fresh.")) {
+      if (confirm("Are you sure you want to clear the entire database across all devices? All members and transactions will be deleted so you can start fresh.")) {
         resetDatabase();
-        alert("Database cleared successfully. You can now start again!");
+        alert("Database cleared successfully. You can now start fresh!");
       }
     });
   }
@@ -1285,7 +1379,7 @@ function bindAuthForm() {
           return;
         }
         if (!match.active) {
-          if (msg) msg.innerHTML = errorBox("This account has been deactivated. Contact an administrator.");
+          if (msg) msg.innerHTML = errorBox("This account has been deactivated. Contact the administrator.");
           if (btn) { btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`; }
           return;
         }
@@ -1317,14 +1411,17 @@ function bindAuthForm() {
           return;
         }
 
-        const isFirst = DATA.members.length === 0;
+        // Single Administrator Rule: First member registered becomes Founding Administrator
+        const activeAdmins = DATA.members.filter((m) => m.active && m.role === "admin");
+        const isFirstAdmin = activeAdmins.length === 0;
+
         const newMember = {
           id: uid("m"),
           name,
           nickname,
           email,
           hash,
-          role: isFirst ? "admin" : "member",
+          role: isFirstAdmin ? "admin" : "member",
           weeklyAmount: Number(DATA.settings.defaultWeeklyAmount || 250),
           penaltyOwed: 0,
           joined: todayISO(),
@@ -1404,7 +1501,7 @@ function bindAdminForms() {
     row.querySelector(".toggle-role-btn")?.addEventListener("click", () => {
       const admins = DATA.members.filter((m) => m.active && m.role === "admin");
       if (member.role === "admin" && admins.length <= 1) {
-        alert("At least one administrator must remain. Promote another member first.");
+        alert("At least one administrator must remain.");
         return;
       }
       member.role = member.role === "admin" ? "member" : "admin";
@@ -1413,7 +1510,7 @@ function bindAdminForms() {
     row.querySelector(".remove-member-btn")?.addEventListener("click", () => {
       const admins = DATA.members.filter((m) => m.active && m.role === "admin");
       if (member.role === "admin" && admins.length <= 1) {
-        alert("At least one administrator must remain. Promote another member before removing this one.");
+        alert("At least one administrator must remain.");
         return;
       }
       if (!confirm(`Deactivate ${member.nickname}'s account? They won't be able to log in, but historical data is preserved.`)) return;
