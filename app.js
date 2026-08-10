@@ -74,6 +74,13 @@ function loadData() {
     }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed.members)) parsed.members = [];
+    else {
+      parsed.members.forEach((m) => {
+        if (typeof m.active === "undefined") m.active = true;
+        if (typeof m.weeklyAmount === "undefined") m.weeklyAmount = parsed.settings?.defaultWeeklyAmount || 250;
+        if (typeof m.penaltyOwed === "undefined") m.penaltyOwed = 0;
+      });
+    }
     if (!Array.isArray(parsed.transactions)) parsed.transactions = [];
     if (!Array.isArray(parsed.investments)) parsed.investments = [];
     if (!Array.isArray(parsed.meetings)) parsed.meetings = [];
@@ -492,7 +499,7 @@ function viewAuth(mode) {
           </form>
           <p class="auth-switch">
             ${isLogin ? "New member?" : "Already registered?"}
-            <button data-goto="${isLogin ? "/register" : "/login"}">${isLogin ? "Create account" : "Log in"}</button>
+            <button type="button" data-goto="${isLogin ? "/register" : "/login"}">${isLogin ? "Create account" : "Log in"}</button>
           </p>
         </div>
         <p class="auth-footnote">Private partnership system. Your member details will automatically reflect in the group roster once created.</p>
@@ -1244,10 +1251,11 @@ function bindBackupHandlers() {
 function bindAuthForm() {
   const form = document.getElementById("authForm");
   if (!form) return;
-  const isLogin = (form.getAttribute("data-mode") || (route() === "/login" ? "login" : "register")) === "login";
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const currentMode = form.getAttribute("data-mode") || (route().startsWith("/login") ? "login" : "register");
+    const isLogin = currentMode === "login";
     const msg = document.getElementById("authMsg");
     const btn = document.getElementById("authSubmitBtn");
     if (msg) msg.innerHTML = "";
