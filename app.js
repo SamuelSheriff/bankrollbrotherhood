@@ -1,11 +1,16 @@
 /* =========================================================================
    Bankroll Brotherhood — vanilla JS SPA
-   Data persists in cloud API (JSONBlob) & localStorage under key "bb_data_v2".
+   Data persists in Supabase (schema: "bankroll") & localStorage under key "bb_data_v2".
    ========================================================================= */
 
 const STORAGE_KEY = "bb_data_v2";
 const SESSION_KEY = "bb_session_v2";
-const CLOUD_SYNC_URL = "https://jsonblob.com/api/jsonBlob/019fedda-2a46-7026-96bc-57e6a093f13c";
+
+const SUPABASE_CONFIG = {
+  url: "https://cecggsnvrfnxlpfhoyip.supabase.co",
+  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlY2dnc252cmZueGxwZmhveWlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4MjEwNDYsImV4cCI6MjA5MzM5NzA0Nn0.fPAV0J1m0U64JdOzCMpivM7kMr_C3XsMnP7DhCigtW4",
+  schema: "bankroll",
+};
 
 const IMG = {
   office: "https://images.unsplash.com/photo-1758519288814-bb9f97e4df95?fm=jpg&q=75&w=1800&auto=format&fit=crop",
@@ -126,51 +131,286 @@ function saveData() {
   pushToCloud();
 }
 
-let _cloudSyncPaused = false; // Pause cloud sync briefly after writes to prevent race conditions
+/* Supabase client & real-time cloud database sync */
+let supabaseClient = null;
+let _cloudSyncPaused = false;
+let cloudSyncStatus = {
+  ok: false,
+  message: "Connecting to Supabase...",
+  lastSync: null,
+};
+
+function getSupabase() {
+  if (supabaseClient) return supabaseClient;
+  if (window.supabase && typeof window.supabase.createClient === "function") {
+    try {
+      supabaseClient = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
+        db: { schema: SUPABASE_CONFIG.schema },
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+    } catch (e) {
+      console.warn("Supabase init error:", e);
+    }
+  }
+  return supabaseClient;
+}
 
 async function syncFromCloud() {
   if (_cloudSyncPaused) return;
+  const client = getSupabase();
+  if (!client) {
+    cloudSyncStatus = { ok: false, message: "Supabase client not loaded", lastSync: null };
+    return;
+  }
+
   try {
-    const res = await fetch(CLOUD_SYNC_URL, { cache: "no-store" });
-    if (!res.ok) return;
-    const parsed = await res.json();
-    if (parsed && typeof parsed === "object") {
-      const sanitized = sanitizeData(parsed);
-      // Only apply cloud data if it is NEWER than our local copy
-      const cloudTs = sanitized._lastUpdated || 0;
-      const localTs = DATA._lastUpdated || 0;
-      if (cloudTs > localTs) {
-        DATA = sanitized;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
-        render();
+    // 1. Try to fetch from snapshot backup table (bankroll.app_data)
+    const { data: snapData, error: snapErr } = await client
+      .from("app_data")
+      .select("*")
+      .eq("id", "primary")
+      .maybeSingle();
+
+    if (snapErr) {
+      if (snapErr.code === "PGRST106") {
+        cloudSyncStatus = {
+          ok: false,
+          code: "PGRST106",
+          message: "Schema 'bankroll' not exposed yet. In Supabase Dashboard -> Settings -> API -> Exposed schemas, add 'bankroll'.",
+          lastSync: null,
+        };
+      } else if (snapErr.code === "42P01") {
+        cloudSyncStatus = {
+          ok: false,
+          code: "42P01",
+          message: "Tables not created yet. Run supabase_schema.sql in the Supabase SQL Editor.",
+          lastSync: null,
+        };
+      } else {
+        cloudSyncStatus = { ok: false, message: snapErr.message, lastSync: null };
       }
+      return;
+    }
+
+    // 2. Query relational tables
+    const [mRes, txRes, invRes, mtRes, sRes] = await Promise.all([
+      client.from("members").select("*"),
+      client.from("transactions").select("*"),
+      client.from("investments").select("*"),
+      client.from("meetings").select("*"),
+      client.from("settings").select("*").eq("id", "default").maybeSingle(),
+    ]);
+
+    const s = sRes?.data;
+    const cloudTs = snapData?.last_updated || s?.last_updated || 0;
+    const localTs = DATA._lastUpdated || 0;
+    const cloudHasData = (mRes.data && mRes.data.length > 0) || (txRes.data && txRes.data.length > 0) || !!snapData;
+    const localHasNoMembers = !DATA.members || DATA.members.length === 0;
+
+    cloudSyncStatus = {
+      ok: true,
+      message: "Connected to Supabase (schema: bankroll)",
+      lastSync: new Date().toLocaleTimeString(),
+    };
+
+    if (cloudTs > localTs || (cloudHasData && localHasNoMembers)) {
+      if (snapData?.data && typeof snapData.data === "object" && (snapData.data.members?.length || !cloudHasData)) {
+        DATA = sanitizeData(snapData.data);
+      } else {
+        // Construct from relational tables
+        if (s) {
+          DATA.settings = {
+            groupName: s.group_name || DATA.settings.groupName,
+            founded: s.founded || DATA.settings.founded,
+            defaultWeeklyAmount: Number(s.default_weekly_amount || 250),
+            penaltyRule: s.penalty_rule || DATA.settings.penaltyRule,
+          };
+        }
+        if (mRes.data) {
+          DATA.members = mRes.data.map((m) => ({
+            id: m.id,
+            name: m.name,
+            nickname: m.nickname,
+            email: m.email,
+            hash: m.hash,
+            role: m.role,
+            weeklyAmount: Number(m.weekly_amount || 250),
+            penaltyOwed: Number(m.penalty_owed || 0),
+            joined: m.joined,
+            active: m.active,
+          }));
+        }
+        if (txRes.data) {
+          DATA.transactions = txRes.data.map((t) => ({
+            id: t.id,
+            memberId: t.member_id,
+            type: t.type,
+            amount: Number(t.amount || 0),
+            date: t.date,
+            mpesaCode: t.mpesa_code || "",
+            note: t.note || "",
+          }));
+        }
+        if (invRes.data) {
+          DATA.investments = invRes.data.map((i) => ({
+            id: i.id,
+            name: i.name,
+            invested: Number(i.invested || 0),
+            current: Number(i.current || 0),
+            status: i.status || "Active",
+          }));
+        }
+        if (mtRes.data) {
+          DATA.meetings = mtRes.data.map((m) => ({
+            id: m.id,
+            date: m.date,
+            topic: m.topic,
+          }));
+        }
+        DATA = sanitizeData(DATA);
+      }
+      DATA._lastUpdated = cloudTs || Date.now();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
+      render();
+    } else if (localTs > cloudTs && DATA.members && DATA.members.length > 0 && !cloudHasData) {
+      // Local has restored/newer data that hasn't been pushed to Supabase yet
+      pushToCloud();
     }
   } catch (e) {
-    console.warn("Cloud sync fetch error:", e);
+    console.warn("Supabase syncFromCloud error:", e);
+    cloudSyncStatus = { ok: false, message: e.message || "Sync failed", lastSync: null };
   }
 }
 
 async function pushToCloud() {
-  // Pause incoming syncs for 5s after a write to avoid overwrite race
+  const client = getSupabase();
+  if (!client) return;
+
   _cloudSyncPaused = true;
   setTimeout(() => { _cloudSyncPaused = false; }, 5000);
+
   try {
-    await fetch(CLOUD_SYNC_URL, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(DATA),
+    const lastUpdated = DATA._lastUpdated || Date.now();
+
+    // 1. Snapshot table (atomic single-document backup)
+    await client.from("app_data").upsert({
+      id: "primary",
+      data: DATA,
+      last_updated: lastUpdated,
+      updated_at: new Date().toISOString(),
     });
+
+    // 2. Settings table
+    const s = DATA.settings || {};
+    await client.from("settings").upsert({
+      id: "default",
+      group_name: s.groupName || "Bankroll Brotherhood",
+      founded: s.founded || todayISO(),
+      default_weekly_amount: Number(s.defaultWeeklyAmount || 250),
+      penalty_rule: s.penaltyRule || "",
+      last_updated: lastUpdated,
+      updated_at: new Date().toISOString(),
+    });
+
+    // 3. Members table
+    if (Array.isArray(DATA.members) && DATA.members.length > 0) {
+      await client.from("members").upsert(
+        DATA.members.map((m) => ({
+          id: m.id,
+          name: m.name || "",
+          nickname: m.nickname || "",
+          email: (m.email || "").toLowerCase(),
+          hash: m.hash || "",
+          role: m.role || "member",
+          weekly_amount: Number(m.weeklyAmount || 250),
+          penalty_owed: Number(m.penaltyOwed || 0),
+          joined: m.joined || todayISO(),
+          active: m.active !== false,
+        }))
+      );
+    }
+
+    // 4. Transactions table
+    if (Array.isArray(DATA.transactions) && DATA.transactions.length > 0) {
+      await client.from("transactions").upsert(
+        DATA.transactions.map((t) => ({
+          id: t.id,
+          member_id: t.memberId,
+          type: t.type || "contribution",
+          amount: Number(t.amount || 0),
+          date: t.date || todayISO(),
+          mpesa_code: t.mpesaCode || "",
+          note: t.note || "",
+        }))
+      );
+    }
+
+    // 5. Investments table
+    if (Array.isArray(DATA.investments) && DATA.investments.length > 0) {
+      await client.from("investments").upsert(
+        DATA.investments.map((i) => ({
+          id: i.id,
+          name: i.name || "",
+          invested: Number(i.invested || 0),
+          current: Number(i.current || 0),
+          status: i.status || "Active",
+        }))
+      );
+    }
+
+    // 6. Meetings table
+    if (Array.isArray(DATA.meetings) && DATA.meetings.length > 0) {
+      await client.from("meetings").upsert(
+        DATA.meetings.map((m) => ({
+          id: m.id,
+          date: m.date || todayISO(),
+          topic: m.topic || "",
+        }))
+      );
+    }
+
+    cloudSyncStatus = {
+      ok: true,
+      message: "Connected to Supabase (schema: bankroll)",
+      lastSync: new Date().toLocaleTimeString(),
+    };
   } catch (e) {
-    console.warn("Cloud sync push error:", e);
+    console.warn("Supabase pushToCloud error:", e);
   }
 }
 
-function resetDatabase() {
+async function supabaseDelete(table, id) {
+  const client = getSupabase();
+  if (!client || !id) return;
+  try {
+    await client.from(table).delete().eq("id", id);
+  } catch (e) {
+    console.warn(`Supabase delete error (${table}):`, e);
+  }
+}
+
+async function resetDatabase() {
   localStorage.removeItem(STORAGE_KEY);
   localStorage.removeItem(SESSION_KEY);
   DATA = seedData();
   _cloudSyncPaused = false;
   saveData();
+
+  const client = getSupabase();
+  if (client) {
+    try {
+      await Promise.all([
+        client.from("transactions").delete().neq("id", ""),
+        client.from("members").delete().neq("id", ""),
+        client.from("investments").delete().neq("id", ""),
+        client.from("meetings").delete().neq("id", ""),
+        client.from("app_data").delete().eq("id", "primary"),
+      ]);
+    } catch (e) {
+      console.warn("Supabase resetDatabase error:", e);
+    }
+  }
+
   render();
 }
 
@@ -1175,6 +1415,51 @@ function adminSettingsTab() {
         </button>
       </div>
     </div>
+
+    <div class="card" style="flex:1 1 360px;max-width:520px">
+      <div class="flex justify-between items-center" style="margin-bottom:8px">
+        <h3 style="font-family:var(--font-display);font-size:16px;margin:0">Supabase Cloud Database</h3>
+        <span class="status-pill ${cloudSyncStatus.ok ? "teal" : "gold"}" id="supabaseStatusBadge" style="font-size:11px">
+          ${cloudSyncStatus.ok ? "● Connected" : "● Action Needed"}
+        </span>
+      </div>
+      <p class="hint">Shared database configuration for Bankroll Brotherhood.</p>
+      
+      <div style="background:var(--card-sub);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 14px;margin:12px 0;font-size:12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="color:var(--muted)">Project URL:</span>
+          <span style="font-family:monospace;color:var(--text)">${SUPABASE_CONFIG.url.replace("https://", "")}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="color:var(--muted)">Schema:</span>
+          <span style="font-family:monospace;color:var(--gold)">${SUPABASE_CONFIG.schema}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:var(--muted)">Status:</span>
+          <span style="color:${cloudSyncStatus.ok ? "var(--teal)" : "var(--gold)"}">${escapeHtml(cloudSyncStatus.message)}</span>
+        </div>
+      </div>
+
+      <div class="flex gap-10 flex-wrap" style="margin-top:12px">
+        <button class="btn btn-ghost btn-sm" id="syncSupabaseBtn">
+          ${icon("refresh", 14)} Sync from Supabase
+        </button>
+        <button class="btn btn-ghost btn-sm" id="pushSupabaseBtn">
+          ${icon("upload", 14)} Push to Supabase
+        </button>
+      </div>
+      <div id="supabaseSyncMsg" style="margin-top:10px"></div>
+
+      <div style="margin-top:16px;padding:12px;background:rgba(212,175,55,0.06);border:1px solid rgba(212,175,55,0.2);border-radius:var(--radius-sm)">
+        <div style="font-size:12px;font-weight:600;color:var(--gold);margin-bottom:4px">Schema Setup</div>
+        <p style="font-size:11px;color:var(--muted);margin:0 0 8px;line-height:1.4">
+          To initialize tables in this shared database, run <code>supabase_schema.sql</code> in your Supabase SQL Editor.
+        </p>
+        <a href="https://supabase.com/dashboard/project/cecggsnvrfnxlpfhoyip/sql" target="_blank" rel="noopener" class="btn btn-gold btn-xs" style="text-decoration:none">
+          Open Supabase SQL Editor &rarr;
+        </a>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -1293,6 +1578,7 @@ function bindTransactionHandlers() {
     const id = row.getAttribute("data-tx-id");
     row.querySelector(".delete-tx-btn")?.addEventListener("click", () => {
       if (!confirm("Delete this transaction record?")) return;
+      supabaseDelete("transactions", id);
       DATA.transactions = DATA.transactions.filter((t) => t.id !== id);
       saveData();
       render();
@@ -1541,6 +1827,7 @@ function bindAdminForms() {
         return;
       }
       if (!confirm(`Permanently delete ${member.nickname}'s account record? This cannot be undone.`)) return;
+      supabaseDelete("members", id);
       DATA.members = DATA.members.filter((m) => m.id !== id);
       const sess = getSession();
       if (sess && sess.memberId === id) clearSession();
@@ -1574,6 +1861,7 @@ function bindAdminForms() {
     });
     row.querySelector(".delete-inv-btn")?.addEventListener("click", () => {
       if (!confirm(`Delete "${inv.name}"?`)) return;
+      supabaseDelete("investments", id);
       DATA.investments = DATA.investments.filter((i) => i.id !== id);
       saveData(); render();
     });
@@ -1595,6 +1883,7 @@ function bindAdminForms() {
   document.querySelectorAll("[data-meeting-id]").forEach((row) => {
     const id = row.getAttribute("data-meeting-id");
     row.querySelector(".delete-meeting-btn")?.addEventListener("click", () => {
+      supabaseDelete("meetings", id);
       DATA.meetings = DATA.meetings.filter((m) => m.id !== id);
       saveData(); render();
     });
@@ -1611,6 +1900,44 @@ function bindAdminForms() {
       saveData();
       const msg = document.getElementById("settingsMsg");
       if (msg) msg.innerHTML = successBox("Settings saved.");
+    });
+  }
+
+  const syncSupabaseBtn = document.getElementById("syncSupabaseBtn");
+  if (syncSupabaseBtn) {
+    syncSupabaseBtn.addEventListener("click", async () => {
+      const msg = document.getElementById("supabaseSyncMsg");
+      if (msg) msg.innerHTML = `<span class="hint">Connecting to Supabase...</span>`;
+      syncSupabaseBtn.disabled = true;
+      await syncFromCloud();
+      syncSupabaseBtn.disabled = false;
+      if (msg) {
+        if (cloudSyncStatus.ok) {
+          msg.innerHTML = successBox(`Synced from Supabase at ${cloudSyncStatus.lastSync}`);
+        } else {
+          msg.innerHTML = errorBox(cloudSyncStatus.message);
+        }
+      }
+      render();
+    });
+  }
+
+  const pushSupabaseBtn = document.getElementById("pushSupabaseBtn");
+  if (pushSupabaseBtn) {
+    pushSupabaseBtn.addEventListener("click", async () => {
+      const msg = document.getElementById("supabaseSyncMsg");
+      if (msg) msg.innerHTML = `<span class="hint">Pushing data to Supabase...</span>`;
+      pushSupabaseBtn.disabled = true;
+      await pushToCloud();
+      pushSupabaseBtn.disabled = false;
+      if (msg) {
+        if (cloudSyncStatus.ok) {
+          msg.innerHTML = successBox(`Data pushed to Supabase at ${cloudSyncStatus.lastSync}`);
+        } else {
+          msg.innerHTML = errorBox(cloudSyncStatus.message);
+        }
+      }
+      render();
     });
   }
 }
