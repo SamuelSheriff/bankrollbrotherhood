@@ -1,0 +1,16 @@
+{
+  "name": "Bankroll Brotherhood — Savings & Investment Partnership",
+  "short_name": "Bankroll",
+  "description": "Private savings and investment partnership tracking tool.",
+  "start_url": "./#/",
+  "display": "standalone",
+  "background_color": "#07090D",
+  "theme_color": "#07090D",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><rect width='24' height='24' rx='5' fill='%23D4AF37'/><path d='M3 21h18M5 21V9l7-6 7 6v12M9 21v-6h6v6' stroke='%230A0D12' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}
