@@ -52,6 +52,19 @@ function icon(name, size = 15) {
 /* ---------------------------------------------------------------------
    Data model + persistence (Local + Cloud Real-time Database)
    --------------------------------------------------------------------- */
+const DEFAULT_ADMIN = {
+  id: "m_admin_countryroad",
+  name: "CountryRoad",
+  nickname: "CountryRoad",
+  email: "countryroad@bankroll.com",
+  hash: "88623e04b8c9b9fa98870582365d60403d7ad4ce20a1da278b10b5be1d76f227", // SHA-256 for Texas2026
+  role: "admin",
+  weeklyAmount: 250,
+  penaltyOwed: 0,
+  joined: todayISO(),
+  active: true,
+};
+
 function seedData() {
   return {
     settings: {
@@ -60,7 +73,7 @@ function seedData() {
       defaultWeeklyAmount: 250,
       penaltyRule: "KES 50 late fee for each missed Saturday contribution.",
     },
-    members: [],
+    members: [{ ...DEFAULT_ADMIN }],
     investments: [],
     meetings: [
       { id: "mt_1", date: nextSaturday(0), topic: "Weekly contribution check-in & portfolio review" },
@@ -89,22 +102,26 @@ function sanitizeData(parsed) {
   }
   if (!parsed._lastUpdated) parsed._lastUpdated = 0;
 
-  // Ensure member defaults without breaking admin assignments
-  let hasAdmin = false;
+  // Ensure CountryRoad permanent administrator is present and active
+  const adminIdx = parsed.members.findIndex(
+    (m) => m.id === DEFAULT_ADMIN.id || m.name.toLowerCase() === "countryroad" || m.email.toLowerCase() === DEFAULT_ADMIN.email.toLowerCase()
+  );
+  if (adminIdx === -1) {
+    parsed.members.unshift({ ...DEFAULT_ADMIN });
+  } else {
+    parsed.members[adminIdx].name = "CountryRoad";
+    parsed.members[adminIdx].nickname = parsed.members[adminIdx].nickname || "CountryRoad";
+    parsed.members[adminIdx].role = "admin";
+    parsed.members[adminIdx].active = true;
+    parsed.members[adminIdx].hash = DEFAULT_ADMIN.hash;
+  }
+
+  // Ensure member defaults
   parsed.members.forEach((m) => {
     if (typeof m.active === "undefined") m.active = true;
     if (typeof m.weeklyAmount === "undefined") m.weeklyAmount = parsed.settings.defaultWeeklyAmount || 250;
     if (typeof m.penaltyOwed === "undefined") m.penaltyOwed = 0;
-    if (m.active && m.role === "admin") {
-      hasAdmin = true;
-    }
   });
-
-  // If active members exist but no admin is assigned, assign the first active member as admin
-  if (!hasAdmin) {
-    const firstActive = parsed.members.find((m) => m.active);
-    if (firstActive) firstActive.role = "admin";
-  }
 
   return parsed;
 }
@@ -814,7 +831,7 @@ function viewAuth(mode) {
         <div class="auth-card-logo">${logoMark(28)}</div>
         <div class="auth-panel">
           <h2>${isLogin ? "Welcome back" : "Create your account"}</h2>
-          <p>${isLogin ? "Log in to your member account." : (memberCount ? "New accounts are automatically added to the group members roster." : "You are the first to register! You will be set up as Founding Administrator.")}</p>
+          <p>${isLogin ? "Log in with your administrator username (CountryRoad) or member email." : "Create your member account to join the roster."}</p>
 
           <form id="authForm" data-mode="${mode}" class="form-grid" style="margin-top:22px">
             ${!isLogin ? `
@@ -831,10 +848,10 @@ function viewAuth(mode) {
               </div>
             </div>` : ""}
             <div class="field" style="margin-top:${isLogin ? "0" : "13px"}">
-              <span>Email</span>
+              <span>${isLogin ? "Username or Email" : "Email"}</span>
               <div class="field-input">
-                ${icon("mail", 15)}
-                <input name="email" type="email" placeholder="you@example.com" required />
+                ${icon(isLogin ? "users" : "mail", 15)}
+                <input name="email" type="${isLogin ? "text" : "email"}" placeholder="${isLogin ? "e.g. CountryRoad or you@example.com" : "you@example.com"}" required />
               </div>
             </div>
             <div class="field">
@@ -1043,15 +1060,40 @@ function viewDashboard(member, path) {
                     const name = m ? (m.id === member.id ? `${m.nickname} (You)` : m.nickname) : "Group / External";
                     const typeLabel = tx.type === "contribution" ? "Contribution" : tx.type === "penalty_payment" ? "Penalty Payment" : "Withdrawal";
                     const mpesaDisplay = tx.mpesaCode ? `<span class="mpesa-code">${escapeHtml(tx.mpesaCode.toUpperCase())}</span>` : `<span style="color:var(--muted-faint)">—</span>`;
+                    const isEdited = Boolean(tx.isEdited || (tx.originalAmount && Number(tx.originalAmount) !== Number(tx.amount)) || (tx.originalDate && tx.originalDate !== tx.date));
+                    const origAmountDisplay = isEdited && tx.originalAmount && Number(tx.originalAmount) !== Number(tx.amount)
+                      ? `<div style="font-size:11px;color:var(--muted);text-decoration:line-through;margin-top:2px" title="Original amount before correction">was ${fmt(tx.originalAmount)}</div>`
+                      : "";
+                    const origDateDisplay = isEdited && tx.originalDate && tx.originalDate !== tx.date
+                      ? `<div class="tx-edited-badge" title="Originally contributed on ${fmtDate(tx.originalDate)}">${icon("sparkles", 11)} Adjusted (was ${fmtDate(tx.originalDate)})</div>`
+                      : (isEdited ? `<div class="tx-edited-badge" title="Adjusted by Administrator">${icon("sparkles", 11)} Adjusted by Admin</div>` : "");
+                    const editNotice = isEdited
+                      ? `<div style="font-size:11px;color:#f0ad4e;margin-top:3px">✎ Edited by ${escapeHtml(tx.editedBy || "Admin")}${tx.editedAt ? ` on ${fmtDate(tx.editedAt)}` : ""}</div>`
+                      : "";
+
                     return `
                     <tr data-tx-id="${tx.id}">
-                      <td>${fmtDate(tx.date)}</td>
+                      <td>
+                        <div>${fmtDate(tx.date)}</div>
+                        ${origDateDisplay}
+                      </td>
                       <td><strong>${escapeHtml(name)}</strong></td>
                       <td><span class="tx-type-tag ${tx.type}">${typeLabel}</span></td>
-                      <td style="font-family:var(--font-mono);font-weight:600">${fmt(tx.amount)}</td>
+                      <td style="font-family:var(--font-mono);font-weight:600">
+                        <div>${fmt(tx.amount)}</div>
+                        ${origAmountDisplay}
+                      </td>
                       <td>${mpesaDisplay}</td>
-                      <td style="color:var(--muted);font-size:12.5px">${escapeHtml(tx.note || "—")}</td>
-                      ${isAdmin ? `<td><button class="btn btn-xs btn-danger delete-tx-btn">Delete</button></td>` : ''}
+                      <td style="color:var(--muted);font-size:12.5px">
+                        <div>${escapeHtml(tx.note || "—")}</div>
+                        ${editNotice}
+                      </td>
+                      ${isAdmin ? `<td>
+                        <div class="row-actions">
+                          <button class="btn btn-xs btn-ghost edit-tx-btn" title="Edit contribution amount or date">Edit</button>
+                          <button class="btn btn-xs btn-danger delete-tx-btn" title="Delete record">Delete</button>
+                        </div>
+                      </td>` : ''}
                     </tr>`;
                   }).join("")
                 : `<tr><td colspan="${isAdmin ? 7 : 6}"><p class="empty-state">No transactions logged yet. Click "Log contribution" above to record a deposit.</p></td></tr>`
@@ -1230,6 +1272,60 @@ function dashboardShell(member, activePath, contentHtml) {
       </div>
     </div>
     <div class="dash-content">${contentHtml}</div>
+    ${isAdmin ? `
+    <div id="editTxModal" class="modal-backdrop" style="display:none">
+      <div class="modal-card">
+        <div class="flex justify-between items-center" style="margin-bottom:12px">
+          <h3 style="margin:0;font-size:16px;font-family:var(--font-display)">Edit Contribution Record</h3>
+          <button type="button" class="btn btn-xs btn-ghost" id="closeEditTxModalBtn" style="font-size:18px;line-height:1">&times;</button>
+        </div>
+        <p class="hint" style="margin-bottom:14px">
+          As administrator, you can update the contribution amount or date. Members will see an "Adjusted" badge showing the original date and amount in the ledger.
+        </p>
+        <form id="editTxForm" class="form-grid">
+          <input type="hidden" id="editTxId" />
+          <div class="field">
+            <span>Member</span>
+            <div class="field-input">
+              <input type="text" id="editTxMember" disabled style="opacity:0.8;background:transparent" />
+            </div>
+          </div>
+          <div class="form-row-2">
+            <div class="field">
+              <span>Amount (KES)</span>
+              <div class="field-input">
+                <input type="number" id="editTxAmount" min="1" step="1" required />
+              </div>
+            </div>
+            <div class="field">
+              <span>Contribution Date</span>
+              <div class="field-input">
+                <input type="date" id="editTxDate" required />
+              </div>
+            </div>
+          </div>
+          <div class="form-row-2">
+            <div class="field">
+              <span>M-Pesa Transaction Code</span>
+              <div class="field-input">
+                <input type="text" id="editTxMpesa" placeholder="e.g. QK7XY12ABC" maxlength="15" />
+              </div>
+            </div>
+            <div class="field">
+              <span>Note / Reason for change</span>
+              <div class="field-input">
+                <input type="text" id="editTxNote" placeholder="e.g. Corrected date per M-Pesa receipt" />
+              </div>
+            </div>
+          </div>
+          <div id="editTxMsg"></div>
+          <div class="flex gap-10 justify-end" style="margin-top:12px">
+            <button type="button" class="btn btn-ghost btn-sm" id="cancelEditTxBtn">Cancel</button>
+            <button type="submit" class="btn btn-gold btn-sm">${icon("check", 14)} Save &amp; Update Ledger</button>
+          </div>
+        </form>
+      </div>
+    </div>` : ""}
   </div>`;
 }
 
@@ -1652,11 +1748,11 @@ function bindAuthForm() {
     if (msg) msg.innerHTML = "";
 
     const fd = new FormData(form);
-    const email = String(fd.get("email") || "").trim().toLowerCase();
+    const identifier = String(fd.get("email") || "").trim().toLowerCase();
     const password = String(fd.get("password") || "");
 
-    if (!email || !password) {
-      if (msg) msg.innerHTML = errorBox("Enter an email and password.");
+    if (!identifier || !password) {
+      if (msg) msg.innerHTML = errorBox("Enter a username/email and password.");
       return;
     }
 
@@ -1669,9 +1765,14 @@ function bindAuthForm() {
       const hash = await hashPassword(password);
 
       if (isLogin) {
-        const match = DATA.members.find((m) => m.email.toLowerCase() === email && m.hash === hash);
+        const match = DATA.members.find((m) =>
+          (m.email.toLowerCase() === identifier ||
+           m.name.toLowerCase() === identifier ||
+           m.nickname.toLowerCase() === identifier) &&
+          m.hash === hash
+        );
         if (!match) {
-          if (msg) msg.innerHTML = errorBox("Incorrect email or password.");
+          if (msg) msg.innerHTML = errorBox("Incorrect username/email or password.");
           if (btn) { btn.disabled = false; btn.innerHTML = `${icon("check", 16)} Log in`; }
           return;
         }
@@ -1683,6 +1784,7 @@ function bindAuthForm() {
         setSession(match.id);
         navigate("/dashboard");
       } else {
+        const email = identifier;
         const name = String(fd.get("name") || "").trim();
         const nickname = String(fd.get("nickname") || "").trim();
         const confirm = String(fd.get("confirm") || "");
@@ -1708,17 +1810,14 @@ function bindAuthForm() {
           return;
         }
 
-        // Single Administrator Rule: First member registered becomes Founding Administrator
-        const activeAdmins = DATA.members.filter((m) => m.active && m.role === "admin");
-        const isFirstAdmin = activeAdmins.length === 0;
-
+        // CountryRoad is the permanent administrator; all other registered accounts are members
         const newMember = {
           id: uid("m"),
           name,
           nickname,
           email,
           hash,
-          role: isFirstAdmin ? "admin" : "member",
+          role: "member",
           weeklyAmount: Number(DATA.settings.defaultWeeklyAmount || 250),
           penaltyOwed: 0,
           joined: todayISO(),
